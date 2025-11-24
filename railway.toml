@@ -1,0 +1,20 @@
+[deploy]
+healthcheckPath = "/health"
+healthcheckTimeout = 100
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 10
+
+[build]
+builder = "NIXPACKS"
+
+[[services]]
+name = "gemini-api-server"
+
+[services.variables]
+PORT = "8000"
+PYTHONUNBUFFERED = "1"
+
+[services.health_checks]
+path = "/health"
+timeout_seconds = 10
+interval_seconds = 30

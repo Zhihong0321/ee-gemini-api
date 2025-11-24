@@ -1,0 +1,60 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Environment Variables
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Factory
+.factory/
+
+# Test files
+test_*.py
+*_test.py
+simple_*.py
+
+# Temporary files
+temp/
+tmp/
+*.tmp
+
+# Credentials
+cookies.txt
+credentials.json
+
+# Gemini-API submodule (don't commit submodule)
+Gemini-API/
