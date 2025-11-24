@@ -51,6 +51,7 @@ simple_*.py
 temp/
 tmp/
 *.tmp
+data/
 
 # Credentials
 cookies.txt

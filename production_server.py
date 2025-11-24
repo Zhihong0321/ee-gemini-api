@@ -5,10 +5,11 @@ Optimized for cloud deployment with proper error handling and security
 """
 
 import os
+import json
 import asyncio
 import uuid
 import logging
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 from pathlib import Path
 import tempfile
 from datetime import datetime
@@ -16,7 +17,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse
 from pydantic import BaseModel, Field
 import uvicorn
 
@@ -30,6 +31,7 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+BASE_DIR = Path(__file__).parent
 
 # Configure gemini logging to be less verbose
 set_log_level("WARNING")
@@ -42,6 +44,8 @@ chat_sessions: Dict[str, Any] = {}
 RAILWAY_ENVIRONMENT = os.getenv("RAILWAY_ENVIRONMENT", "development")
 PORT = int(os.getenv("PORT", "8000"))
 HOST = os.getenv("HOST", "0.0.0.0")
+COOKIE_UPDATE_TOKEN = os.getenv("COOKIE_UPDATE_TOKEN")
+COOKIES_FILE = Path(os.getenv("COOKIE_STORE_PATH", str(BASE_DIR / "data" / "cookies.json")))
 
 # Pydantic models for production
 class MessageRequest(BaseModel):
@@ -94,13 +98,46 @@ async def lifespan(app: FastAPI):
     if gemini_client:
         await gemini_client.close()
 
-async def get_or_init_client() -> GeminiClient:
+def _load_cookies_from_store() -> Tuple[Optional[str], Optional[str]]:
+    try:
+        if COOKIES_FILE.exists():
+            data = json.loads(COOKIES_FILE.read_text())
+            return data.get("SECURE_1PSID"), data.get("SECURE_1PSIDTS")
+    except Exception as exc:
+        logger.warning(f"Failed to read cookie store: {exc}")
+    return None, None
+
+
+def _persist_cookies(secure_1psid: str, secure_1psidts: Optional[str]) -> None:
+    try:
+        COOKIES_FILE.parent.mkdir(parents=True, exist_ok=True)
+        COOKIES_FILE.write_text(json.dumps({
+            "SECURE_1PSID": secure_1psid,
+            "SECURE_1PSIDTS": secure_1psidts
+        }))
+    except Exception as exc:
+        logger.error(f"Failed to persist cookies: {exc}")
+        raise HTTPException(status_code=500, detail="Unable to persist cookies")
+
+
+def _get_stored_credentials() -> Tuple[Optional[str], Optional[str]]:
+    env_psid = os.getenv("SECURE_1PSID")
+    env_psidts = os.getenv("SECURE_1PSIDTS")
+    if env_psid:
+        return env_psid, env_psidts
+    return _load_cookies_from_store()
+
+
+async def get_or_init_client(force_reload: bool = False) -> GeminiClient:
     """Get or initialize the Gemini client with error handling"""
     global gemini_client
     
+    if force_reload and gemini_client is not None:
+        await gemini_client.close()
+        gemini_client = None
+
     if gemini_client is None:
-        secure_1psid = os.getenv("SECURE_1PSID")
-        secure_1psidts = os.getenv("SECURE_1PSIDTS")
+        secure_1psid, secure_1psidts = _get_stored_credentials()
         
         if not secure_1psid:
             raise ValueError("SECURE_1PSID environment variable is required")
@@ -133,6 +170,30 @@ def get_model_enum(model_name: str) -> Model:
         "unspecified": Model.UNSPECIFIED,
     }
     return model_map.get(model_name, Model.G_2_5_FLASH)
+
+
+def _extract_secure_cookies(cookie_payload: Any) -> Tuple[Optional[str], Optional[str]]:
+    cookies = []
+    if isinstance(cookie_payload, list):
+        cookies = cookie_payload
+    elif isinstance(cookie_payload, dict):
+        if "cookies" in cookie_payload and isinstance(cookie_payload["cookies"], list):
+            cookies = cookie_payload["cookies"]
+        else:
+            cookies = [cookie_payload]
+
+    secure_1psid = None
+    secure_1psidts = None
+
+    for entry in cookies:
+        name = entry.get("name") if isinstance(entry, dict) else None
+        value = entry.get("value") if isinstance(entry, dict) else None
+        if name == "__Secure-1PSID":
+            secure_1psid = value
+        elif name == "__Secure-1PSIDTS":
+            secure_1psidts = value
+
+    return secure_1psid, secure_1psidts
 
 # Initialize FastAPI app with lifespan
 app = FastAPI(
@@ -173,6 +234,74 @@ async def root():
         "version": "1.0.0",
         "environment": RAILWAY_ENVIRONMENT,
         "status": "running"
+    }
+
+
+@app.get("/cookies", response_class=HTMLResponse)
+async def cookie_form():
+    """Simple admin form to paste cookie JSON"""
+    token_field = ""
+    if COOKIE_UPDATE_TOKEN:
+        token_field = """
+            <label for=\"token\">Admin Token</label>
+            <input type=\"password\" id=\"token\" name=\"token\" placeholder=\"Enter token\" required />
+        """
+
+    html_content = f"""
+    <html>
+        <head>
+            <title>Update Gemini Cookies</title>
+            <style>
+                body {{ font-family: Arial, sans-serif; margin: 2rem; max-width: 720px; }}
+                form {{ display: flex; flex-direction: column; gap: 1rem; }}
+                textarea {{ width: 100%; height: 320px; font-family: monospace; }}
+                .message {{ color: #666; font-size: 0.9rem; }}
+                button {{ padding: 0.75rem; font-size: 1rem; cursor: pointer; }}
+            </style>
+        </head>
+        <body>
+            <h2>Paste Gemini Cookie JSON</h2>
+            <p class=\"message\">Paste the export from your browser's cookie viewer. Only __Secure-1PSID and __Secure-1PSIDTS are stored.</p>
+            <form method=\"post\" action=\"/cookies\">
+                {token_field}
+                <textarea name=\"cookie_json\" placeholder=\"[{{}}]\" required></textarea>
+                <button type=\"submit\">Update Cookies</button>
+            </form>
+        </body>
+    </html>
+    """
+    return HTMLResponse(content=html_content)
+
+
+@app.post("/cookies")
+async def update_cookies(cookie_json: str = Form(...), token: Optional[str] = Form(default=None)):
+    """Accept cookie JSON, persist it, and reload the Gemini client."""
+    if COOKIE_UPDATE_TOKEN and token != COOKIE_UPDATE_TOKEN:
+        raise HTTPException(status_code=403, detail="Invalid admin token")
+
+    try:
+        payload = json.loads(cookie_json)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON payload: {exc}")
+
+    secure_1psid, secure_1psidts = _extract_secure_cookies(payload)
+
+    if not secure_1psid:
+        raise HTTPException(status_code=400, detail="__Secure-1PSID cookie not found")
+
+    os.environ["SECURE_1PSID"] = secure_1psid
+    if secure_1psidts:
+        os.environ["SECURE_1PSIDTS"] = secure_1psidts
+
+    _persist_cookies(secure_1psid, secure_1psidts)
+
+    await get_or_init_client(force_reload=True)
+
+    return {
+        "success": True,
+        "message": "Gemini cookies updated successfully",
+        "updated_at": datetime.utcnow().isoformat(),
+        "has_sidts": bool(secure_1psidts)
     }
 
 @app.get("/health", response_model=StatusResponse)
