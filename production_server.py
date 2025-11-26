@@ -5,6 +5,7 @@ Optimized for cloud deployment with proper error handling and security
 """
 
 import os
+import re
 import json
 import asyncio
 import uuid
@@ -14,6 +15,7 @@ from pathlib import Path
 import tempfile
 from datetime import datetime
 from contextlib import asynccontextmanager
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -147,6 +149,62 @@ def _persist_gems(gems: List[Dict[str, Any]]) -> None:
         GEMS_FILE.write_text(json.dumps(gems))
     except Exception:
         raise HTTPException(status_code=500, detail="Unable to persist gems")
+
+
+_GEM_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+
+
+def _extract_gem_id(system_prompt: str) -> Optional[str]:
+    """
+    Normalize system_prompt into a gem id. Accepts:
+    - gem://<id> or gemini://<id>
+    - https://gemini.google.com/gem/<id> (or /app/gem/<id>)
+    - bare gem id
+    Returns the gem id or None if it cannot be parsed.
+    """
+    if not system_prompt:
+        return None
+
+    sp = system_prompt.strip()
+    if not sp:
+        return None
+
+    lower = sp.lower()
+    for prefix in ("gem://", "gemini://"):
+        if lower.startswith(prefix):
+            candidate = sp[len(prefix):].strip().strip("/")
+            return candidate or None
+
+    if "gemini.google.com" in lower:
+        parsed = urlparse(sp)
+        parts = [p for p in parsed.path.split("/") if p]
+        if parts:
+            candidate = parts[-1].split("?")[0].split("#")[0].strip()
+            if _GEM_ID_PATTERN.match(candidate):
+                return candidate
+
+    if _GEM_ID_PATTERN.match(sp):
+        return sp
+
+    return None
+
+
+def _build_prompt_kwargs(model: Model, system_prompt: Optional[str]) -> Tuple[Dict[str, Any], Optional[str]]:
+    """
+    Build keyword arguments for Gemini calls while validating system_prompt as a Gem.
+    Returns (kwargs, gem_id) so chat sessions can persist the Gem choice.
+    """
+    kw: Dict[str, Any] = {"model": model}
+    gem_id = None
+    if system_prompt:
+        gem_id = _extract_gem_id(system_prompt)
+        if not gem_id:
+            raise HTTPException(
+                status_code=400,
+                detail="system_prompt must be a gem://<id> or Gemini gem share URL"
+            )
+        kw["gem"] = gem_id
+    return kw, gem_id
 
 
 def _get_stored_credentials_for(account_id: str) -> Tuple[Optional[str], Optional[str]]:
@@ -679,9 +737,7 @@ async def send_message(request: MessageRequest):
         model = get_model_enum(request.model)
         
         try:
-            kw = {"model": model}
-            if request.system_prompt:
-                kw["system_prompt"] = request.system_prompt
+            kw, _ = _build_prompt_kwargs(model, request.system_prompt)
             response = await client.generate_content(
                 prompt=request.message,
                 **kw
@@ -740,13 +796,11 @@ async def send_chat_message(session_id: str, request: MessageRequest):
         model = get_model_enum(request.model)
         
         try:
-            kw = {"model": model}
-            if request.system_prompt:
-                kw["system_prompt"] = request.system_prompt
-            response = await chat.send_message(
-                prompt=request.message,
-                **kw
-            )
+            kw, gem_id = _build_prompt_kwargs(model, request.system_prompt)
+            chat.model = kw["model"]
+            if gem_id:
+                chat.gem = gem_id
+            response = await chat.send_message(prompt=request.message)
         except UsageLimitExceeded as e:
             raise HTTPException(status_code=429, detail="Rate limit exceeded")
         except TemporarilyBlocked as e:
@@ -804,7 +858,7 @@ async def list_gems():
         generated: List[Dict[str, Any]] = []
         try:
             client = await get_or_init_client()
-            response = await client.generate_content(
+            response = await client.send_message(
                 prompt='''List ALL my custom Gems from gemini.google.com. Output ONLY valid JSON array of objects with keys name, id, desc.''',
                 model=Model.G_2_5_PRO
             )
@@ -879,7 +933,7 @@ async def detailed_status():
             test_client = clients.get("primary") or next(iter(clients.values()))
         if test_client:
             try:
-                test_response = await test_client.generate_content(
+                test_response = await test_client.send_message(
                     "Just say 'OK' - this is a health check.",
                     model=Model.G_2_5_FLASH
                 )

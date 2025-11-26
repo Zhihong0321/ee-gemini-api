@@ -84,6 +84,12 @@ DEL  /chat/{session_id}   # Delete session
 GET  /chat                # List all sessions
 ```
 
+### Gems (system prompts)
+```
+GET  /gems                # Discover Gems (stored + live-fetched)
+POST /gems                # Import/add Gems (append; de-dupe by id)
+```
+
 ### File Upload
 ```
 POST /upload              # Upload file (returns path)
@@ -113,6 +119,43 @@ curl -X POST "http://localhost:8000/chat/session-id-here" \
   -d '{
     "message": "What is machine learning?",
     "model": "gemini-2.5-pro"
+  }'
+```
+
+### Gems: discover and use
+Supported `system_prompt` formats:
+- `gem://<id>` or `gemini://<id>`
+- `https://gemini.google.com/gem/<id>` (or `/app/gem/<id>`)
+- bare Gem ID (alphanumeric plus `_` or `-`)
+
+Discover (merges stored + live scan):
+```bash
+curl -X GET "http://localhost:8000/gems"
+```
+Response fields:
+- `stored`: gems previously imported or saved on disk
+- `generated`: gems fetched live from Gemini
+- `merged`: combined list de-duped by id
+- `count`: number of merged gems
+
+Import/add:
+```bash
+curl -X POST "http://localhost:8000/gems" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "gems": [
+      {"name": "Solar Headlines", "id": "https://gemini.google.com/gem/c9d02eab1195", "desc": "Malaysia solar PV news"}
+    ]
+  }'
+```
+
+Use a Gem in chat:
+```bash
+curl -X POST "http://localhost:8000/chat" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "message": "get me a list of Malaysia solar pv news headline in 2025",
+    "system_prompt": "gem://c9d02eab1195"
   }'
 ```
 
