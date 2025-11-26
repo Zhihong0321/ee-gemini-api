@@ -334,7 +334,7 @@ async def root():
                 <div class=\"rounded-xl border bg-white p-6 shadow-sm\">
                   <h2 class=\"text-base font-semibold\">Paste Cookie JSON</h2>
                   <p class=\"mt-1 text-xs text-gray-500\">Only __Secure-1PSID and __Secure-1PSIDTS are stored.</p>
-                  <form id=\"cookieForm\" class=\"mt-4 space-y-3\">
+                  <form id=\"cookieForm\" method=\"post\" action=\"/cookies\" enctype=\"multipart/form-data\" class=\"mt-4 space-y-3\">
                     __TOKEN__
                     <label class=\"block text-sm font-medium text-gray-700\">Account ID</label>
                     <input type=\"text\" id=\"account_id\" name=\"account_id\" placeholder=\"primary\" class=\"mt-1 w-full rounded-md border border-gray-300 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500\" />
@@ -533,8 +533,21 @@ async def update_cookies(cookie_json: str = Form(...), account_id: Optional[str]
 
     try:
         payload = json.loads(cookie_json)
-    except json.JSONDecodeError as exc:
-        raise HTTPException(status_code=400, detail=f"Invalid JSON payload: {exc}")
+    except json.JSONDecodeError:
+        # Fallback: try to parse raw text for cookie pairs
+        text = cookie_json or ""
+        import re
+        def find_val(name: str) -> Optional[str]:
+            m = re.search(rf"{name}\s*=\s*([^;\s]+)", text)
+            if m:
+                return m.group(1)
+            # JSON-like patterns
+            m2 = re.search(rf"\"name\"\s*:\s*\"{name}\"[\s\S]*?\"value\"\s*:\s*\"([^\"]+)\"", text)
+            return m2.group(1) if m2 else None
+        payload = {"cookies": [
+            {"name": "__Secure-1PSID", "value": find_val("__Secure-1PSID")},
+            {"name": "__Secure-1PSIDTS", "value": find_val("__Secure-1PSIDTS")}
+        ]}
 
     secure_1psid, secure_1psidts = _extract_secure_cookies(payload)
 
