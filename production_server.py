@@ -501,6 +501,7 @@ async def root():
               try {{
                 const aid = data.account_id || 'primary';
                 const sel = document.getElementById('accSelect');
+                try { localStorage.setItem('lastAccountId', aid); } catch(e) {}
                 if (sel) {{
                   const exists = Array.from(sel.options).some(o => o.value === aid);
                   if (!exists) {{
@@ -509,6 +510,7 @@ async def root():
                     opt.textContent = aid;
                     sel.appendChild(opt);
                   }}
+                  sel.value = aid;
                 }}
               }} catch(e) {{}}
             }} else {{
