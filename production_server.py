@@ -201,8 +201,8 @@ def get_model_enum(model_name: str) -> Model:
     return model_map.get(model_name, Model.G_2_5_FLASH)
 
 
-def _extract_secure_cookies(cookie_payload: Any) -> Tuple[Optional[str], Optional[str]]:
-    cookies = []
+def _extract_secure_cookies_any(cookie_payload: Any, raw_text: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+    cookies: List[Any] = []
     if isinstance(cookie_payload, list):
         cookies = cookie_payload
     elif isinstance(cookie_payload, dict):
@@ -215,12 +215,25 @@ def _extract_secure_cookies(cookie_payload: Any) -> Tuple[Optional[str], Optiona
     secure_1psidts = None
 
     for entry in cookies:
-        name = entry.get("name") if isinstance(entry, dict) else None
-        value = entry.get("value") if isinstance(entry, dict) else None
-        if name == "__Secure-1PSID":
-            secure_1psid = value
-        elif name == "__Secure-1PSIDTS":
-            secure_1psidts = value
+        if isinstance(entry, dict):
+            name = entry.get("name")
+            value = entry.get("value")
+            if name == "__Secure-1PSID":
+                secure_1psid = value
+            elif name == "__Secure-1PSIDTS":
+                secure_1psidts = value
+
+    if (not secure_1psid) and isinstance(raw_text, str) and raw_text:
+        try:
+            import re
+            m = re.search(r"\"name\"\s*:\s*\"__Secure-1PSID\"[\s\S]*?\"value\"\s*:\s*\"([^\"]+)\"", raw_text)
+            if m:
+                secure_1psid = m.group(1)
+            m2 = re.search(r"\"name\"\s*:\s*\"__Secure-1PSIDTS\"[\s\S]*?\"value\"\s*:\s*\"([^\"]+)\"", raw_text)
+            if m2:
+                secure_1psidts = m2.group(1)
+        except Exception:
+            pass
 
     return secure_1psid, secure_1psidts
 
@@ -639,25 +652,13 @@ async def update_cookies(cookie_json: str = Form(...), account_id: Optional[str]
     if COOKIE_UPDATE_TOKEN and token != COOKIE_UPDATE_TOKEN:
         raise HTTPException(status_code=403, detail="Invalid admin token")
 
+    raw_text = cookie_json
     try:
         payload = json.loads(cookie_json)
     except json.JSONDecodeError:
-        # Fallback: try to parse raw text for cookie pairs
-        text = cookie_json or ""
-        import re
-        def find_val(name: str) -> Optional[str]:
-            m = re.search(rf"{name}\s*=\s*([^;\s]+)", text)
-            if m:
-                return m.group(1)
-            # JSON-like patterns
-            m2 = re.search(rf"\"name\"\s*:\s*\"{name}\"[\s\S]*?\"value\"\s*:\s*\"([^\"]+)\"", text)
-            return m2.group(1) if m2 else None
-        payload = {"cookies": [
-            {"name": "__Secure-1PSID", "value": find_val("__Secure-1PSID")},
-            {"name": "__Secure-1PSIDTS", "value": find_val("__Secure-1PSIDTS")}
-        ]}
+        payload = {"cookies": []}
 
-    secure_1psid, secure_1psidts = _extract_secure_cookies(payload)
+    secure_1psid, secure_1psidts = _extract_secure_cookies_any(payload, raw_text)
 
     if not secure_1psid:
         raise HTTPException(status_code=400, detail="__Secure-1PSID cookie not found")
