@@ -47,9 +47,48 @@ RAILWAY_ENVIRONMENT = os.getenv("RAILWAY_ENVIRONMENT", "development")
 PORT = int(os.getenv("PORT", "8000"))
 HOST = os.getenv("HOST", "0.0.0.0")
 COOKIE_UPDATE_TOKEN = os.getenv("COOKIE_UPDATE_TOKEN")
+
 STORAGE_ROOT = Path(os.getenv("STORAGE_ROOT", "/session-cookie"))
+try:
+    STORAGE_ROOT.mkdir(parents=True, exist_ok=True)
+    if not os.access(STORAGE_ROOT, os.W_OK):
+        raise PermissionError(f"Storage root not writable: {STORAGE_ROOT}")
+except Exception as exc:
+    # Hard fail: no silent fallback. Fix mount/permissions and redeploy.
+    raise RuntimeError(f"Storage root unavailable: {exc}")
+
 COOKIES_FILE = Path(os.getenv("COOKIE_STORE_PATH", str(STORAGE_ROOT / "cookies.json")))
 GEMS_FILE = Path(os.getenv("GEMS_STORE_PATH", str(STORAGE_ROOT / "gems.json")))
+
+
+def _ensure_writable_dir(dir_path: Path) -> None:
+    """
+    Ensure the target directory exists and is writable.
+    If permissions are too strict (e.g., volume mounted root-only), try to relax them once.
+    Hard-fail with a clear error if still not writable.
+    """
+    dir_path.mkdir(parents=True, exist_ok=True)
+    test_file = dir_path / ".perm_test"
+    try:
+        test_file.touch(exist_ok=True)
+        test_file.unlink(missing_ok=True)
+        return
+    except Exception:
+        pass
+
+    try:
+        dir_path.chmod(0o775)
+        test_file.touch(exist_ok=True)
+        test_file.unlink(missing_ok=True)
+        return
+    except Exception as exc:
+        raise RuntimeError(
+            f"Storage path not writable: {dir_path}. "
+            f"Fix volume permissions or mount path. Error: {exc}"
+        )
+
+
+_ensure_writable_dir(STORAGE_ROOT)
 
 # Pydantic models for production
 class MessageRequest(BaseModel):
