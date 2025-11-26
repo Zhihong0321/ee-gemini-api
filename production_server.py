@@ -858,7 +858,7 @@ async def list_gems():
         generated: List[Dict[str, Any]] = []
         try:
             client = await get_or_init_client()
-            response = await client.send_message(
+            response = await client.generate_content(
                 prompt='''List ALL my custom Gems from gemini.google.com. Output ONLY valid JSON array of objects with keys name, id, desc.''',
                 model=Model.G_2_5_PRO
             )
@@ -933,7 +933,7 @@ async def detailed_status():
             test_client = clients.get("primary") or next(iter(clients.values()))
         if test_client:
             try:
-                test_response = await test_client.send_message(
+                await test_client.generate_content(
                     "Just say 'OK' - this is a health check.",
                     model=Model.G_2_5_FLASH
                 )
