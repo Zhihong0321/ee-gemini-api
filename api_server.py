@@ -18,7 +18,7 @@ load_dotenv()
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
 from pydantic import BaseModel, Field
 import uvicorn
 
@@ -115,10 +115,123 @@ def get_model_enum(model_name: str) -> Model:
     }
     return model_map.get(model_name, Model.G_2_5_FLASH)
 
-@app.get("/", response_model=Dict[str, str])
+@app.get("/", response_class=HTMLResponse)
 async def root():
-    """Root endpoint"""
-    return {"message": "Gemini API Server", "version": "1.0.0"}
+    html_content = """
+    <!doctype html>
+    <html lang=\"en\">
+      <head>
+        <meta charset=\"utf-8\" />
+        <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+        <title>Gemini API Server</title>
+        <script src=\"https://cdn.tailwindcss.com\"></script>
+        <link rel=\"preconnect\" href=\"https://fonts.googleapis.com\" />
+        <link rel=\"preconnect\" href=\"https://fonts.gstatic.com\" crossorigin />
+        <link href=\"https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap\" rel=\"stylesheet\" />
+        <style> body {{ font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }} </style>
+      </head>
+      <body class=\"bg-gray-50\">
+        <div class=\"min-h-screen\">
+          <header class=\"bg-white border-b\">
+            <div class=\"max-w-5xl mx-auto px-4 py-4 flex items-center justify-between\">
+              <div class=\"flex items-center gap-2\">
+                <div class=\"h-8 w-8 rounded-lg bg-indigo-600\"></div>
+                <div>
+                  <h1 class=\"text-lg font-semibold\">Gemini API Server</h1>
+                  <p class=\"text-xs text-gray-500\">Version: 1.0.0</p>
+                </div>
+              </div>
+              <div class=\"flex items-center gap-2\">
+                <a href=\"/docs\" class=\"inline-flex items-center rounded-md bg-gray-900 text-white text-sm px-3 py-2 hover:bg-black\">API Docs</a>
+                <a href=\"/redoc\" class=\"inline-flex items-center rounded-md bg-white border text-sm px-3 py-2 hover:bg-gray-100\">ReDoc</a>
+              </div>
+            </div>
+          </header>
+          <main class=\"max-w-5xl mx-auto px-4 py-8\">
+            <div class=\"grid grid-cols-1 lg:grid-cols-3 gap-6\">
+              <section class=\"lg:col-span-2\">
+                <div class=\"rounded-xl border bg-white p-6 shadow-sm\">
+                  <div class=\"flex items-center justify-between\">
+                    <h2 class=\"text-base font-semibold\">Server Health</h2>
+                    <button id=\"refreshBtn\" class=\"text-sm px-3 py-1.5 rounded-md border hover:bg-gray-50\">Refresh</button>
+                  </div>
+                  <div class=\"mt-4 grid grid-cols-1 sm:grid-cols-2 gap-4\">
+                    <div class=\"rounded-lg border p-4\">
+                      <p class=\"text-xs text-gray-500\">Status</p>
+                      <p id=\"hStatus\" class=\"mt-1 text-sm font-medium\">\u2014</p>
+                    </div>
+                    <div class=\"rounded-lg border p-4\">
+                      <p class=\"text-xs text-gray-500\">Client Initialized</p>
+                      <p id=\"hClient\" class=\"mt-1 text-sm font-medium\">\u2014</p>
+                    </div>
+                    <div class=\"rounded-lg border p-4\">
+                      <p class=\"text-xs text-gray-500\">Active Sessions</p>
+                      <p id=\"hSessions\" class=\"mt-1 text-sm font-medium\">\u2014</p>
+                    </div>
+                  </div>
+                  <div class=\"mt-6 rounded-lg border p-4\">
+                    <p class=\"text-sm font-medium\">Detailed Health</p>
+                    <pre id=\"statusJson\" class=\"mt-2 bg-gray-50 rounded p-3 text-xs overflow-x-auto\"></pre>
+                  </div>
+                </div>
+              </section>
+              <section>
+                <div class=\"rounded-xl border bg-white p-6 shadow-sm\">
+                  <h2 class=\"text-base font-semibold\">Paste Cookie JSON</h2>
+                  <p class=\"mt-1 text-xs text-gray-500\">Only __Secure-1PSID and __Secure-1PSIDTS are stored.</p>
+                  <form id=\"cookieForm\" class=\"mt-4 space-y-3\">
+                    <label class=\"block text-sm font-medium text-gray-700\">Cookie JSON</label>
+                    <textarea name=\"cookie_json\" id=\"cookie_json\" class=\"mt-1 w-full h-40 rounded-md border border-gray-300 px-3 py-2 font-mono text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500\" placeholder=\"[{{}}]\" required></textarea>
+                    <button type=\"submit\" class=\"w-full inline-flex items-center justify-center rounded-md bg-indigo-600 text-white text-sm px-3 py-2 hover:bg-indigo-700\">Update Cookies</button>
+                  </form>
+                  <div id=\"cookieMsg\" class=\"mt-3 text-sm\"></div>
+                </div>
+              </section>
+            </div>
+          </main>
+          <footer class=\"mt-8 py-6 text-center text-xs text-gray-500\">Gemini API Server</footer>
+        </div>
+        <script>
+        async function loadHealth() {
+          try {
+            const h = await fetch('/health').then(r => r.json());
+            document.getElementById('hStatus').textContent = h.status;
+            document.getElementById('hClient').textContent = String(h.client_initialized);
+            document.getElementById('hSessions').textContent = String(h.active_sessions);
+          } catch(e) {}
+          try {
+            const s = await fetch('/health').then(r => r.json());
+            document.getElementById('statusJson').textContent = JSON.stringify(s, null, 2);
+          } catch(e) {}
+        }
+        document.getElementById('refreshBtn').addEventListener('click', loadHealth);
+        loadHealth();
+        document.getElementById('cookieForm').addEventListener('submit', async (ev) => {
+          ev.preventDefault();
+          const el = document.getElementById('cookieMsg');
+          el.textContent = '';
+          const fd = new FormData(ev.target);
+          try {
+            const res = await fetch('/cookies', { method: 'POST', body: fd });
+            const data = await res.json();
+            if (data && data.success) {
+              el.textContent = 'Cookies updated successfully';
+              el.className = 'mt-3 text-sm text-green-600';
+              loadHealth();
+            } else {
+              el.textContent = (data && data.error) ? data.error : 'Update failed';
+              el.className = 'mt-3 text-sm text-red-600';
+            }
+          } catch(e) {
+            el.textContent = String(e);
+            el.className = 'mt-3 text-sm text-red-600';
+          }
+        });
+        </script>
+      </body>
+    </html>
+    """
+    return HTMLResponse(content=html_content)
 
 @app.get("/health", response_model=Dict[str, Any])
 async def health_check():
@@ -430,3 +543,35 @@ if __name__ == "__main__":
         reload=True,
         log_level="info"
     )
+@app.post("/cookies")
+async def update_cookies(cookie_json: str = Form(...)):
+    try:
+        import json as _json
+        payload = _json.loads(cookie_json)
+        cookies = []
+        if isinstance(payload, list):
+            cookies = payload
+        elif isinstance(payload, dict):
+            cookies = payload.get("cookies", []) if isinstance(payload.get("cookies"), list) else [payload]
+        sid = None
+        sidts = None
+        for c in cookies:
+            name = c.get("name") if isinstance(c, dict) else None
+            val = c.get("value") if isinstance(c, dict) else None
+            if name == "__Secure-1PSID":
+                sid = val
+            elif name == "__Secure-1PSIDTS":
+                sidts = val
+        if not sid:
+            raise HTTPException(status_code=400, detail="__Secure-1PSID cookie not found")
+        os.environ["SECURE_1PSID"] = sid
+        if sidts:
+            os.environ["SECURE_1PSIDTS"] = sidts
+        global gemini_client
+        gemini_client = None
+        await get_client()
+        return {"success": True, "has_sidts": bool(sidts)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
