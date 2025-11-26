@@ -829,6 +829,40 @@ async def detailed_status():
         logger.error(f"Status check failed: {e}")
         return {"error": str(e)}
 
+@app.get("/status/accounts")
+async def accounts_status():
+    """Per-account readiness and cookie presence"""
+    try:
+        accs = set(clients.keys())
+        acc_dir = BASE_DIR / "data" / "accounts"
+        if acc_dir.exists():
+            for p in acc_dir.iterdir():
+                if p.is_dir():
+                    accs.add(p.name)
+        # always include primary if env has PSID or legacy store
+        env_psid = os.getenv("SECURE_1PSID")
+        if env_psid:
+            accs.add("primary")
+        if not accs:
+            return {"accounts": []}
+        out = []
+        for aid in sorted(accs):
+            info = {"account_id": aid, "cookies": {"has_psid": False, "has_psidts": False}, "ready": False}
+            # check storage
+            psid, psidts = _get_stored_credentials_for(aid)
+            info["cookies"]["has_psid"] = bool(psid)
+            info["cookies"]["has_psidts"] = bool(psidts)
+            # try init without forcing reload
+            try:
+                cli = await get_or_init_client(aid, force_reload=False)
+                info["ready"] = True if cli else False
+            except Exception as e:
+                info["error"] = str(e)
+            out.append(info)
+        return {"accounts": out, "count": len(out), "timestamp": datetime.utcnow().isoformat()}
+    except Exception as e:
+        return {"error": str(e)}
+
 # Production exception handlers
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request, exc):
