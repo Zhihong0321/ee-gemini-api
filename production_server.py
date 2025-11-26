@@ -978,9 +978,13 @@ async def list_accounts():
         accs = set()
         acc_dir = BASE_DIR / "data" / "accounts"
         if acc_dir.exists():
+            # include any folder directly under accounts
             for p in acc_dir.iterdir():
                 if p.is_dir():
                     accs.add(p.name)
+            # also include any folder that contains a cookies.json
+            for f in acc_dir.rglob("cookies.json"):
+                accs.add(f.parent.name)
         # include primary if env or legacy cookies file exists
         if os.getenv("SECURE_1PSID") or COOKIES_FILE.exists():
             accs.add("primary")
