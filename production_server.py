@@ -498,6 +498,19 @@ async def root():
               el.className = 'mt-3 text-sm text-green-600';
               loadHealth();
               loadAccounts();
+              try {{
+                const aid = data.account_id || 'primary';
+                const sel = document.getElementById('accSelect');
+                if (sel) {{
+                  const exists = Array.from(sel.options).some(o => o.value === aid);
+                  if (!exists) {{
+                    const opt = document.createElement('option');
+                    opt.value = aid;
+                    opt.textContent = aid;
+                    sel.appendChild(opt);
+                  }}
+                }}
+              }} catch(e) {{}}
             }} else {{
               el.textContent = (data && data.error) ? data.error : 'Update failed';
               el.className = 'mt-3 text-sm text-red-600';
