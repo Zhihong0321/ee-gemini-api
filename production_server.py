@@ -51,7 +51,7 @@ COOKIES_FILE = Path(os.getenv("COOKIE_STORE_PATH", str(BASE_DIR / "data" / "cook
 class MessageRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=4000, description="Message to send to Gemini")
     model: str = Field(default="gemini-2.5-flash", description="Model to use")
-    system_prompt: Optional[str] = Field(None, description="System prompt or gem ID")
+    system_prompt: Optional[str] = Field(None, description="System prompt or full gem:// URL (e.g. from gemini.google.com/gem/ID share link). Create/edit Gems on web.")
 
 class ChatResponse(BaseModel):
     response: str
@@ -226,15 +226,143 @@ async def add_security_headers(request: Request, call_next):
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     return response
 
-@app.get("/", response_model=Dict[str, str])
+@app.get("/", response_class=HTMLResponse)
 async def root():
-    """Root endpoint with basic info"""
-    return {
-        "message": "Gemini API Server",
-        "version": "1.0.0",
-        "environment": RAILWAY_ENVIRONMENT,
-        "status": "running"
-    }
+    token_field = ""
+    if COOKIE_UPDATE_TOKEN:
+        token_field = """
+            <label class=\"block text-sm font-medium text-gray-700\">Admin Token</label>
+            <input type=\"password\" id=\"token\" name=\"token\" placeholder=\"Enter token\" class=\"mt-1 w-full rounded-md border border-gray-300 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500\" required />
+        """
+
+    html_content = f"""
+    <!doctype html>
+    <html lang=\"en\">
+      <head>
+        <meta charset=\"utf-8\" />
+        <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+        <title>Gemini API Server</title>
+        <script src=\"https://cdn.tailwindcss.com\"></script>
+        <link rel=\"preconnect\" href=\"https://fonts.googleapis.com\" />
+        <link rel=\"preconnect\" href=\"https://fonts.gstatic.com\" crossorigin />
+        <link href=\"https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap\" rel=\"stylesheet\" />
+        <style>
+          body {{ font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }}
+        </style>
+      </head>
+      <body class=\"bg-gray-50\">
+        <div class=\"min-h-screen\">
+          <header class=\"bg-white border-b\">
+            <div class=\"max-w-5xl mx-auto px-4 py-4 flex items-center justify-between\">
+              <div class=\"flex items-center gap-2\">
+                <div class=\"h-8 w-8 rounded-lg bg-indigo-600\"></div>
+                <div>
+                  <h1 class=\"text-lg font-semibold\">Gemini API Server</h1>
+                  <p class=\"text-xs text-gray-500\">Environment: {RAILWAY_ENVIRONMENT}</p>
+                </div>
+              </div>
+              <div class=\"flex items-center gap-2\">
+                <a href=\"/docs\" class=\"inline-flex items-center rounded-md bg-gray-900 text-white text-sm px-3 py-2 hover:bg-black\">API Docs</a>
+                <a href=\"/redoc\" class=\"inline-flex items-center rounded-md bg-white border text-sm px-3 py-2 hover:bg-gray-100\">ReDoc</a>
+              </div>
+            </div>
+          </header>
+
+          <main class=\"max-w-5xl mx-auto px-4 py-8\">
+            <div class=\"grid grid-cols-1 lg:grid-cols-3 gap-6\">
+              <section class=\"lg:col-span-2\">
+                <div class=\"rounded-xl border bg-white p-6 shadow-sm\">
+                  <div class=\"flex items-center justify-between\">
+                    <h2 class=\"text-base font-semibold\">Server Health</h2>
+                    <button id=\"refreshBtn\" class=\"text-sm px-3 py-1.5 rounded-md border hover:bg-gray-50\">Refresh</button>
+                  </div>
+                  <div id=\"health\" class=\"mt-4 grid grid-cols-1 sm:grid-cols-2 gap-4\">
+                    <div class=\"rounded-lg border p-4\">
+                      <p class=\"text-xs text-gray-500\">Status</p>
+                      <p id=\"hStatus\" class=\"mt-1 text-sm font-medium\">\u2014</p>
+                    </div>
+                    <div class=\"rounded-lg border p-4\">
+                      <p class=\"text-xs text-gray-500\">Client Ready</p>
+                      <p id=\"hClient\" class=\"mt-1 text-sm font-medium\">\u2014</p>
+                    </div>
+                    <div class=\"rounded-lg border p-4\">
+                      <p class=\"text-xs text-gray-500\">Active Sessions</p>
+                      <p id=\"hSessions\" class=\"mt-1 text-sm font-medium\">\u2014</p>
+                    </div>
+                    <div class=\"rounded-lg border p-4\">
+                      <p class=\"text-xs text-gray-500\">Version</p>
+                      <p id=\"hVersion\" class=\"mt-1 text-sm font-medium\">\u2014</p>
+                    </div>
+                  </div>
+                  <div class=\"mt-6 rounded-lg border p-4\">
+                    <p class=\"text-sm font-medium\">Detailed Status</p>
+                    <pre id=\"statusJson\" class=\"mt-2 bg-gray-50 rounded p-3 text-xs overflow-x-auto\"></pre>
+                  </div>
+                </div>
+              </section>
+
+              <section>
+                <div class=\"rounded-xl border bg-white p-6 shadow-sm\">
+                  <h2 class=\"text-base font-semibold\">Paste Cookie JSON</h2>
+                  <p class=\"mt-1 text-xs text-gray-500\">Only __Secure-1PSID and __Secure-1PSIDTS are stored.</p>
+                  <form id=\"cookieForm\" class=\"mt-4 space-y-3\">
+                    {token_field}
+                    <label class=\"block text-sm font-medium text-gray-700\">Cookie JSON</label>
+                    <textarea name=\"cookie_json\" id=\"cookie_json\" class=\"mt-1 w-full h-40 rounded-md border border-gray-300 px-3 py-2 font-mono text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500\" placeholder=\"[{{}}]\" required></textarea>
+                    <button type=\"submit\" class=\"w-full inline-flex items-center justify-center rounded-md bg-indigo-600 text-white text-sm px-3 py-2 hover:bg-indigo-700\">Update Cookies</button>
+                  </form>
+                  <div id=\"cookieMsg\" class=\"mt-3 text-sm\"></div>
+                </div>
+              </section>
+            </div>
+          </main>
+
+          <footer class=\"mt-8 py-6 text-center text-xs text-gray-500\">Gemini API Server</footer>
+        </div>
+
+        <script>
+        async function loadHealth() {{
+          try {{
+            const h = await fetch('/health').then(r => r.json());
+            document.getElementById('hStatus').textContent = h.status;
+            document.getElementById('hClient').textContent = String(h.client_ready);
+            document.getElementById('hSessions').textContent = String(h.active_sessions);
+            document.getElementById('hVersion').textContent = h.version || '1.0.0';
+          }} catch(e) {{}}
+          try {{
+            const s = await fetch('/status').then(r => r.json());
+            document.getElementById('statusJson').textContent = JSON.stringify(s, null, 2);
+          }} catch(e) {{}}
+        }}
+        document.getElementById('refreshBtn').addEventListener('click', loadHealth);
+        loadHealth();
+
+        document.getElementById('cookieForm').addEventListener('submit', async (ev) => {{
+          ev.preventDefault();
+          const el = document.getElementById('cookieMsg');
+          el.textContent = '';
+          const fd = new FormData(ev.target);
+          try {{
+            const res = await fetch('/cookies', {{ method: 'POST', body: fd }});
+            const data = await res.json();
+            if (data && data.success) {{
+              el.textContent = 'Cookies updated successfully';
+              el.className = 'mt-3 text-sm text-green-600';
+              loadHealth();
+            }} else {{
+              el.textContent = (data && data.error) ? data.error : 'Update failed';
+              el.className = 'mt-3 text-sm text-red-600';
+            }}
+          }} catch(e) {{
+            el.textContent = String(e);
+            el.className = 'mt-3 text-sm text-red-600';
+          }}
+        }});
+        </script>
+      </body>
+    </html>
+    """
+    return HTMLResponse(content=html_content)
 
 
 @app.get("/cookies", response_class=HTMLResponse)
@@ -345,9 +473,12 @@ async def send_message(request: MessageRequest):
         model = get_model_enum(request.model)
         
         try:
+            kw = {"model": model}
+            if request.system_prompt:
+                kw["system_prompt"] = request.system_prompt
             response = await client.generate_content(
                 prompt=request.message,
-                model=model
+                **kw
             )
         except UsageLimitExceeded as e:
             logger.warning(f"Rate limit exceeded: {e}")
@@ -401,9 +532,12 @@ async def send_chat_message(session_id: str, request: MessageRequest):
         model = get_model_enum(request.model)
         
         try:
+            kw = {"model": model}
+            if request.system_prompt:
+                kw["system_prompt"] = request.system_prompt
             response = await chat.send_message(
                 prompt=request.message,
-                model=model
+                **kw
             )
         except UsageLimitExceeded as e:
             raise HTTPException(status_code=429, detail="Rate limit exceeded")
@@ -454,6 +588,36 @@ async def delete_chat_session(session_id: str):
     
     del chat_sessions[session_id]
     return {"message": "Chat session deleted", "session_id": session_id}
+
+@app.get("/gems")
+async def list_gems():
+    """Scan/list user's Gems by querying Gemini (workaround, as no native API). Records IDs for reuse."""
+    try:
+        client = await get_or_init_client()
+        response = await client.generate_content(
+            prompt='''List ALL my custom Gems from gemini.google.com.
+For each: name, short description, full "gem://" ID or share URL (https://gemini.google.com/gem/ID).
+Output ONLY valid JSON array: [{"name": "Gem Name", "id": "gem://... or https://gemini.google.com/gem/ID", "desc": "brief desc"}].
+If no Gems, return [].''',
+            model=Model.G_2_5_PRO  # Better for parsing
+        )
+        import re
+        import json
+        # Extract JSON array from response
+        json_match = re.search(r'\[\s*\{[^}]*\}\s*\]', response.text, re.DOTALL)
+        if json_match:
+            gems = json.loads(json_match.group())
+        else:
+            gems = []
+        return {
+            "gems": gems,
+            "count": len(gems),
+            "note": "Gemini-AI generated list (verify accuracy on gemini.google.com). Cache or save IDs for /chat use.",
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.warning(f"Gems list query failed: {e}")
+        return {"error": str(e), "gems": [], "note": "Client/auth issue? Update cookies first."}
 
 @app.get("/status")
 async def detailed_status():
