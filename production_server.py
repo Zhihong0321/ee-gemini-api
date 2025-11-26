@@ -10,6 +10,7 @@ import json
 import asyncio
 import uuid
 import logging
+import shutil
 from typing import Optional, List, Dict, Any, Tuple
 from pathlib import Path
 import tempfile
@@ -742,6 +743,7 @@ async def update_cookies(cookie_json: str = Form(...), account_id: Optional[str]
         raise HTTPException(status_code=403, detail="Invalid admin token")
 
     raw_text = cookie_json
+    aid = (account_id or "primary").strip() or "primary"
     try:
         payload = json.loads(cookie_json)
     except json.JSONDecodeError:
@@ -752,24 +754,24 @@ async def update_cookies(cookie_json: str = Form(...), account_id: Optional[str]
     if not secure_1psid:
         raise HTTPException(status_code=400, detail="__Secure-1PSID cookie not found")
 
-    if (account_id or "primary") == "primary":
+    if aid == "primary":
         os.environ["SECURE_1PSID"] = secure_1psid
         if secure_1psidts:
             os.environ["SECURE_1PSIDTS"] = secure_1psidts
         _persist_cookies(secure_1psid, secure_1psidts)
     else:
-        p = _cookies_path_for(account_id)
+        p = _cookies_path_for(aid)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(json.dumps({"SECURE_1PSID": secure_1psid, "SECURE_1PSIDTS": secure_1psidts}))
 
-    await get_or_init_client(account_id, force_reload=True)
+    await get_or_init_client(aid, force_reload=True)
 
     return {
         "success": True,
         "message": "Gemini cookies updated successfully",
         "updated_at": datetime.utcnow().isoformat(),
         "has_sidts": bool(secure_1psidts),
-        "account_id": account_id or "primary"
+        "account_id": aid
     }
 
 @app.get("/health", response_model=StatusResponse)
@@ -1151,3 +1153,36 @@ async def upsert_account(payload: AccountCookies, token: Optional[str] = None):
     except Exception:
         pass
     return {"success": True, "account_id": aid, "has_sidts": bool(secure_1psidts), "updated_at": datetime.utcnow().isoformat()}
+
+
+@app.delete("/accounts/{account_id}")
+async def delete_account(account_id: str):
+    aid = (account_id or "").strip()
+    if not aid:
+        raise HTTPException(status_code=400, detail="account_id required")
+
+    # Close and remove in-memory client/sessions
+    if aid in clients:
+        try:
+            await clients[aid].close()
+        except Exception:
+            pass
+        clients.pop(aid, None)
+    chat_sessions.pop(aid, None)
+
+    # Remove stored cookies for this account
+    if aid == "primary":
+        try:
+            if COOKIES_FILE.exists():
+                COOKIES_FILE.unlink()
+        except Exception:
+            pass
+    else:
+        acc_dir = _account_dir(aid)
+        if acc_dir.exists():
+            try:
+                shutil.rmtree(acc_dir)
+            except Exception:
+                pass
+
+    return {"success": True, "account_id": aid, "deleted": True}
