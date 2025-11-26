@@ -46,6 +46,7 @@ PORT = int(os.getenv("PORT", "8000"))
 HOST = os.getenv("HOST", "0.0.0.0")
 COOKIE_UPDATE_TOKEN = os.getenv("COOKIE_UPDATE_TOKEN")
 COOKIES_FILE = Path(os.getenv("COOKIE_STORE_PATH", str(BASE_DIR / "data" / "cookies.json")))
+GEMS_FILE = Path(os.getenv("GEMS_STORE_PATH", str(BASE_DIR / "data" / "gems.json")))
 
 # Pydantic models for production
 class MessageRequest(BaseModel):
@@ -118,6 +119,21 @@ def _persist_cookies(secure_1psid: str, secure_1psidts: Optional[str]) -> None:
     except Exception as exc:
         logger.error(f"Failed to persist cookies: {exc}")
         raise HTTPException(status_code=500, detail="Unable to persist cookies")
+
+def _load_gems_from_store() -> List[Dict[str, Any]]:
+    try:
+        if GEMS_FILE.exists():
+            return json.loads(GEMS_FILE.read_text())
+    except Exception:
+        return []
+    return []
+
+def _persist_gems(gems: List[Dict[str, Any]]) -> None:
+    try:
+        GEMS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        GEMS_FILE.write_text(json.dumps(gems))
+    except Exception:
+        raise HTTPException(status_code=500, detail="Unable to persist gems")
 
 
 def _get_stored_credentials() -> Tuple[Optional[str], Optional[str]]:
@@ -591,33 +607,68 @@ async def delete_chat_session(session_id: str):
 
 @app.get("/gems")
 async def list_gems():
-    """Scan/list user's Gems by querying Gemini (workaround, as no native API). Records IDs for reuse."""
+    """Scan/list user's Gems and merge with stored records."""
     try:
-        client = await get_or_init_client()
-        response = await client.generate_content(
-            prompt='''List ALL my custom Gems from gemini.google.com.
-For each: name, short description, full "gem://" ID or share URL (https://gemini.google.com/gem/ID).
-Output ONLY valid JSON array: [{"name": "Gem Name", "id": "gem://... or https://gemini.google.com/gem/ID", "desc": "brief desc"}].
-If no Gems, return [].''',
-            model=Model.G_2_5_PRO  # Better for parsing
-        )
-        import re
-        import json
-        # Extract JSON array from response
-        json_match = re.search(r'\[\s*\{[^}]*\}\s*\]', response.text, re.DOTALL)
-        if json_match:
-            gems = json.loads(json_match.group())
-        else:
-            gems = []
-        return {
-            "gems": gems,
-            "count": len(gems),
-            "note": "Gemini-AI generated list (verify accuracy on gemini.google.com). Cache or save IDs for /chat use.",
-            "timestamp": datetime.utcnow().isoformat()
-        }
+        stored = _load_gems_from_store()
+        generated: List[Dict[str, Any]] = []
+        try:
+            client = await get_or_init_client()
+            response = await client.generate_content(
+                prompt='''List ALL my custom Gems from gemini.google.com. Output ONLY valid JSON array of objects with keys name, id, desc.''',
+                model=Model.G_2_5_PRO
+            )
+            import re
+            import json as _json
+            json_match = re.search(r'\[\s*\{[\s\S]*?\}\s*\]', response.text)
+            if json_match:
+                generated = _json.loads(json_match.group())
+        except Exception:
+            generated = []
+        def norm(items: List[Dict[str, Any]]):
+            out = []
+            seen = set()
+            for it in items:
+                gid = (it.get("id") or "").strip()
+                if not gid or gid in seen:
+                    continue
+                seen.add(gid)
+                out.append({
+                    "name": it.get("name") or "",
+                    "id": gid,
+                    "desc": it.get("desc") or ""
+                })
+            return out
+        merged = norm(stored) + [x for x in norm(generated) if x["id"] not in {y["id"] for y in norm(stored)}]
+        return {"stored": norm(stored), "generated": norm(generated), "merged": merged, "count": len(merged), "timestamp": datetime.utcnow().isoformat()}
     except Exception as e:
         logger.warning(f"Gems list query failed: {e}")
         return {"error": str(e), "gems": [], "note": "Client/auth issue? Update cookies first."}
+
+class GemsPayload(BaseModel):
+    gems: List[Dict[str, Any]]
+
+@app.post("/gems")
+async def import_gems(payload: GemsPayload, token: Optional[str] = Form(default=None)):
+    if COOKIE_UPDATE_TOKEN and token is not None and token != COOKIE_UPDATE_TOKEN:
+        raise HTTPException(status_code=403, detail="Invalid admin token")
+    gems = payload.gems if isinstance(payload.gems, list) else []
+    cleaned = []
+    seen = set()
+    for it in gems:
+        gid = (it.get("id") or "").strip()
+        if not gid or gid in seen:
+            continue
+        seen.add(gid)
+        cleaned.append({
+            "name": it.get("name") or "",
+            "id": gid,
+            "desc": it.get("desc") or ""
+        })
+    existing = _load_gems_from_store()
+    existing_ids = {x.get("id") for x in existing}
+    final = existing + [x for x in cleaned if x["id"] not in existing_ids]
+    _persist_gems(final)
+    return {"success": True, "count": len(final)}
 
 @app.get("/status")
 async def detailed_status():
