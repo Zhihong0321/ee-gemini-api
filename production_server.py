@@ -47,8 +47,9 @@ RAILWAY_ENVIRONMENT = os.getenv("RAILWAY_ENVIRONMENT", "development")
 PORT = int(os.getenv("PORT", "8000"))
 HOST = os.getenv("HOST", "0.0.0.0")
 COOKIE_UPDATE_TOKEN = os.getenv("COOKIE_UPDATE_TOKEN")
-COOKIES_FILE = Path(os.getenv("COOKIE_STORE_PATH", str(BASE_DIR / "data" / "cookies.json")))
-GEMS_FILE = Path(os.getenv("GEMS_STORE_PATH", str(BASE_DIR / "data" / "gems.json")))
+STORAGE_ROOT = Path(os.getenv("STORAGE_ROOT", "/session-cookie"))
+COOKIES_FILE = Path(os.getenv("COOKIE_STORE_PATH", str(STORAGE_ROOT / "cookies.json")))
+GEMS_FILE = Path(os.getenv("GEMS_STORE_PATH", str(STORAGE_ROOT / "gems.json")))
 
 # Pydantic models for production
 class MessageRequest(BaseModel):
@@ -106,7 +107,7 @@ async def lifespan(app: FastAPI):
             pass
 
 def _account_dir(account_id: str) -> Path:
-    return BASE_DIR / "data" / "accounts" / account_id
+    return STORAGE_ROOT / "accounts" / account_id
 
 def _cookies_path_for(account_id: str) -> Path:
     return _account_dir(account_id) / "cookies.json"
