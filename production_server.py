@@ -444,9 +444,16 @@ async def root():
                   </div>
                   <div class="mt-4">
                     <label class="block text-sm font-medium text-gray-700">Import Gems JSON</label>
-                    <textarea id="gems_json" class="mt-1 w-full h-32 rounded-md border border-gray-300 px-3 py-2 font-mono text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500" placeholder="[{{\"name\": \"Gem\", \"id\": \"https://gemini.google.com/gem/ID\"}}]"></textarea>
-                    <button id="importGemsBtn" class="mt-2 w-full inline-flex items-center justify-center rounded-md bg-indigo-600 text-white text-sm px-3 py-2 hover:bg-indigo-700">Import Gems</button>
-                    <div id="gemsMsg" class="mt-2 text-sm"></div>
+                    <div class="space-y-2">
+                      <div class="flex gap-2">
+                        <input id="gem_url_input" type="text" class="flex-1 rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500" placeholder="Gem URL or ID (e.g. https://gemini.google.com/gem/abc123)" />
+                        <input id="gem_name_input" type="text" class="w-48 rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500" placeholder="Name (optional)" />
+                        <button id="addGemBtn" type="button" class="rounded-md bg-gray-900 text-white text-sm px-3 py-2 hover:bg-black">Add</button>
+                      </div>
+                      <textarea id="gems_json" class="mt-1 w-full h-32 rounded-md border border-gray-300 px-3 py-2 font-mono text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500" placeholder='[{"name":"Gem Name","id":"https://gemini.google.com/gem/ID"}]'></textarea>
+                      <button id="importGemsBtn" class="w-full inline-flex items-center justify-center rounded-md bg-indigo-600 text-white text-sm px-3 py-2 hover:bg-indigo-700">Import Gems</button>
+                      <div id="gemsMsg" class="mt-2 text-sm"></div>
+                    </div>
                   </div>
                 </div>
               </section>
@@ -615,6 +622,38 @@ async def root():
             el.textContent = String(e);
             el.className = 'mt-2 text-sm text-red-600';
           }
+        });
+
+        function normalizeGemId(raw) {
+          if (!raw) return '';
+          const trimmed = raw.trim();
+          if (!trimmed) return '';
+          if (trimmed.startsWith('http')) return trimmed;
+          return `https://gemini.google.com/gem/${trimmed}`;
+        }
+
+        document.getElementById('addGemBtn').addEventListener('click', () => {
+          const urlRaw = document.getElementById('gem_url_input').value;
+          const nameRaw = document.getElementById('gem_name_input').value;
+          const id = normalizeGemId(urlRaw);
+          const msgEl = document.getElementById('gemsMsg');
+          if (!id) {
+            msgEl.textContent = 'Please enter a Gem URL or ID.';
+            msgEl.className = 'mt-2 text-sm text-red-600';
+            return;
+          }
+          let arr = [];
+          const textarea = document.getElementById('gems_json');
+          if (textarea.value.trim()) {
+            try { arr = JSON.parse(textarea.value); } catch (e) { arr = []; }
+            if (!Array.isArray(arr)) arr = [];
+          }
+          arr.push({ name: nameRaw || id.split('/').pop(), id });
+          textarea.value = JSON.stringify(arr, null, 2);
+          document.getElementById('gem_url_input').value = '';
+          document.getElementById('gem_name_input').value = '';
+          msgEl.textContent = 'Added to import list.';
+          msgEl.className = 'mt-2 text-sm text-green-600';
         });
         </script>
       </body>
