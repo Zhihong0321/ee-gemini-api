@@ -1027,3 +1027,30 @@ if __name__ == "__main__":
         access_log=True,
         reload=RAILWAY_ENVIRONMENT == "development"
     )
+class AccountCookies(BaseModel):
+    account_id: str
+    cookies: List[Dict[str, Any]]
+
+@app.post("/accounts")
+async def upsert_account(payload: AccountCookies, token: Optional[str] = None):
+    if COOKIE_UPDATE_TOKEN and token is not None and token != COOKIE_UPDATE_TOKEN:
+        raise HTTPException(status_code=403, detail="Invalid admin token")
+    aid = (payload.account_id or "").strip()
+    if not aid:
+        raise HTTPException(status_code=400, detail="account_id required")
+    secure_1psid, secure_1psidts = _extract_secure_cookies_any({"cookies": payload.cookies}, None)
+    if not secure_1psid:
+        raise HTTPException(status_code=400, detail="__Secure-1PSID cookie not found")
+    p = _cookies_path_for(aid)
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps({"SECURE_1PSID": secure_1psid, "SECURE_1PSIDTS": secure_1psidts}))
+    except Exception as exc:
+        logger.error(f"Failed to persist account cookies: {exc}")
+        raise HTTPException(status_code=500, detail="Unable to persist account cookies")
+    # Attempt to (re)load client for this account
+    try:
+        await get_or_init_client(aid, force_reload=True)
+    except Exception:
+        pass
+    return {"success": True, "account_id": aid, "has_sidts": bool(secure_1psidts), "updated_at": datetime.utcnow().isoformat()}
