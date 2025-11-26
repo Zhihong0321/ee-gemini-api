@@ -799,20 +799,23 @@ async def import_gems(payload: GemsPayload, token: Optional[str] = None):
 
 @app.get("/status")
 async def detailed_status():
-    """Detailed status for monitoring"""
+    """Detailed status for monitoring (multi-account aware)"""
     try:
         client_stats = {
-            "initialized": gemini_client is not None,
-            "active_sessions": len(chat_sessions),
+            "initialized": len(clients) > 0,
+            "active_sessions": sum(len(v) for v in chat_sessions.values()),
             "environment": RAILWAY_ENVIRONMENT,
             "server_uptime": "running",
+            "accounts": list(clients.keys()),
         }
-        
-        # Test client functionality if available
-        if gemini_client:
+        # Pick any available client to test
+        test_client = None
+        if clients:
+            # prefer primary, else first
+            test_client = clients.get("primary") or next(iter(clients.values()))
+        if test_client:
             try:
-                # Quick test call
-                test_response = await gemini_client.generate_content(
+                test_response = await test_client.generate_content(
                     "Just say 'OK' - this is a health check.",
                     model=Model.G_2_5_FLASH
                 )
@@ -821,9 +824,7 @@ async def detailed_status():
             except Exception as e:
                 client_stats["api_test"] = "failed"
                 client_stats["error"] = str(e)
-        
         return client_stats
-        
     except Exception as e:
         logger.error(f"Status check failed: {e}")
         return {"error": str(e)}
