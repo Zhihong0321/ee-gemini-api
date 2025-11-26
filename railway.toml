@@ -5,7 +5,7 @@ restartPolicyType = "on_failure"
 restartPolicyMaxRetries = 10
 
 [build]
-builder = "NIXPACKS"
+builder = "DOCKERFILE"
 
 [[services]]
 name = "gemini-api-server"
