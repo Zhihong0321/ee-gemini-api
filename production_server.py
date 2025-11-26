@@ -423,10 +423,10 @@ async def root():
           ul.innerHTML = '';
           let accounts = [];
           try {{
-            const a = await fetch('/status/accounts');
+            const a = await fetch('/accounts');
             if (a.ok) {{
               const data = await a.json();
-              accounts = data.accounts || [];
+              accounts = (data.accounts || []).map(aid => ({ account_id: aid }));
             }}
           }} catch(e) {{}}
           if (!accounts.length) {{
@@ -497,6 +497,7 @@ async def root():
               el.textContent = 'Cookies updated successfully';
               el.className = 'mt-3 text-sm text-green-600';
               loadHealth();
+              loadAccounts();
             }} else {{
               el.textContent = (data && data.error) ? data.error : 'Update failed';
               el.className = 'mt-3 text-sm text-red-600';
@@ -954,6 +955,23 @@ async def accounts_status():
         return {"accounts": out, "count": len(out), "timestamp": datetime.utcnow().isoformat()}
     except Exception as e:
         return {"error": str(e)}
+
+@app.get("/accounts")
+async def list_accounts():
+    """List known account ids by scanning storage and environment."""
+    try:
+        accs = set()
+        acc_dir = BASE_DIR / "data" / "accounts"
+        if acc_dir.exists():
+            for p in acc_dir.iterdir():
+                if p.is_dir():
+                    accs.add(p.name)
+        # include primary if env or legacy cookies file exists
+        if os.getenv("SECURE_1PSID") or COOKIES_FILE.exists():
+            accs.add("primary")
+        return {"accounts": sorted(accs), "count": len(accs)}
+    except Exception as e:
+        return {"error": str(e), "accounts": []}
 
 # Production exception handlers
 @app.exception_handler(HTTPException)
