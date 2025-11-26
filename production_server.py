@@ -51,10 +51,7 @@ COOKIE_UPDATE_TOKEN = os.getenv("COOKIE_UPDATE_TOKEN")
 STORAGE_ROOT = Path(os.getenv("STORAGE_ROOT", "/session-cookie"))
 try:
     STORAGE_ROOT.mkdir(parents=True, exist_ok=True)
-    if not os.access(STORAGE_ROOT, os.W_OK):
-        raise PermissionError(f"Storage root not writable: {STORAGE_ROOT}")
 except Exception as exc:
-    # Hard fail: no silent fallback. Fix mount/permissions and redeploy.
     raise RuntimeError(f"Storage root unavailable: {exc}")
 
 COOKIES_FILE = Path(os.getenv("COOKIE_STORE_PATH", str(STORAGE_ROOT / "cookies.json")))
@@ -77,14 +74,14 @@ def _ensure_writable_dir(dir_path: Path) -> None:
         pass
 
     try:
-        dir_path.chmod(0o775)
+        dir_path.chmod(0o777)
         test_file.touch(exist_ok=True)
         test_file.unlink(missing_ok=True)
         return
     except Exception as exc:
         raise RuntimeError(
             f"Storage path not writable: {dir_path}. "
-            f"Fix volume permissions or mount path. Error: {exc}"
+            f"Fix volume permissions or mount path (consider RAILWAY_RUN_UID=0 or pre-start chmod). Error: {exc}"
         )
 
 
