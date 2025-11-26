@@ -858,17 +858,18 @@ async def list_gems():
         generated: List[Dict[str, Any]] = []
         try:
             client = await get_or_init_client()
-            response = await client.generate_content(
-                prompt='''List ALL my custom Gems from gemini.google.com. Output ONLY valid JSON array of objects with keys name, id, desc.''',
-                model=Model.G_2_5_PRO
-            )
-            import re
-            import json as _json
-            json_match = re.search(r'[\[\s*\{[\s\S]*?\}\s*\]]', response.text)
-            if json_match:
-                generated = _json.loads(json_match.group())
+            jar = await client.fetch_gems(include_hidden=False)
+            for gem in jar:
+                generated.append({
+                    "name": gem.name or gem.id,
+                    "id": f"https://gemini.google.com/gem/{gem.id}",
+                    "gem_id": gem.id,
+                    "desc": gem.description or "",
+                    "predefined": gem.predefined,
+                })
         except Exception:
             generated = []
+
         def norm(items: List[Dict[str, Any]]):
             out = []
             seen = set()
@@ -880,11 +881,23 @@ async def list_gems():
                 out.append({
                     "name": it.get("name") or "",
                     "id": gid,
-                    "desc": it.get("desc") or ""
+                    "gem_id": it.get("gem_id") or "",
+                    "desc": it.get("desc") or "",
+                    "predefined": bool(it.get("predefined", False))
                 })
             return out
-        merged = norm(stored) + [x for x in norm(generated) if x["id"] not in {y["id"] for y in norm(stored)}]
-        return {"stored": norm(stored), "generated": norm(generated), "merged": merged, "count": len(merged), "timestamp": datetime.utcnow().isoformat()}
+
+        norm_stored = norm(stored)
+        norm_generated = norm(generated)
+        merged = norm_stored + [x for x in norm_generated if x["id"] not in {y["id"] for y in norm_stored}]
+
+        return {
+            "stored": norm_stored,
+            "generated": norm_generated,
+            "merged": merged,
+            "count": len(merged),
+            "timestamp": datetime.utcnow().isoformat()
+        }
     except Exception as e:
         logger.warning(f"Gems list query failed: {e}")
         return {"error": str(e), "gems": [], "note": "Client/auth issue? Update cookies first."}
