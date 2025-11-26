@@ -436,10 +436,10 @@ async def root():
           ul.innerHTML = '';
           let accounts = [];
           try {{
-            const a = await fetch('/accounts');
+            const a = await fetch('/status/accounts');
             if (a.ok) {{
               const data = await a.json();
-              accounts = (data.accounts || []).map(aid => ({ account_id: aid }));
+              accounts = data.accounts || [];
             }}
           }} catch(e) {{}}
           if (!accounts.length) {{
