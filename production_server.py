@@ -324,6 +324,29 @@ async def root():
                     </div>
                   </div>
                   <div class=\"mt-6 rounded-lg border p-4\">
+                    <div class=\"flex items-center justify-between\">
+                      <p class=\"text-sm font-medium\">Accounts</p>
+                      <button id=\"refreshAccountsBtn\" class=\"text-sm px-3 py-1.5 rounded-md border hover:bg-gray-50\">Refresh</button>
+                    </div>
+                    <div class=\"mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3\">
+                      <div>
+                        <label class=\"block text-xs text-gray-500\">Select Account</label>
+                        <select id=\"accSelect\" class=\"mt-1 w-full rounded-md border border-gray-300 px-3 py-2 text-sm\"></select>
+                      </div>
+                      <div>
+                        <label class=\"block text-xs text-gray-500\">Quick Test Message</label>
+                        <input id=\"testMsg\" type=\"text\" value=\"Say OK\" class=\"mt-1 w-full rounded-md border border-gray-300 px-3 py-2 text-sm\" />
+                      </div>
+                    </div>
+                    <div class=\"mt-3 flex items-center gap-3\">
+                      <button id=\"testAccountBtn\" class=\"text-sm px-3 py-1.5 rounded-md bg-indigo-600 text-white hover:bg-indigo-700\">Run Test</button>
+                      <div id=\"accMsg\" class=\"text-sm\"></div>
+                    </div>
+                    <div class=\"mt-3\">
+                      <ul id=\"accList\" class=\"space-y-2\"></ul>
+                    </div>
+                  </div>
+                  <div class=\"mt-6 rounded-lg border p-4\">
                     <p class=\"text-sm font-medium\">Detailed Status</p>
                     <pre id=\"statusJson\" class=\"mt-2 bg-gray-50 rounded p-3 text-xs overflow-x-auto\"></pre>
                   </div>
@@ -392,6 +415,75 @@ async def root():
         }}
         document.getElementById('refreshBtn').addEventListener('click', loadHealth);
         loadHealth();
+
+        async function loadAccounts() {{
+          const sel = document.getElementById('accSelect');
+          const ul = document.getElementById('accList');
+          sel.innerHTML = '';
+          ul.innerHTML = '';
+          let accounts = [];
+          try {{
+            const a = await fetch('/status/accounts');
+            if (a.ok) {{
+              const data = await a.json();
+              accounts = data.accounts || [];
+            }}
+          }} catch(e) {{}}
+          if (!accounts.length) {{
+            try {{
+              const s = await fetch('/status').then(r => r.json());
+              if (Array.isArray(s.accounts)) {{
+                accounts = s.accounts.map(aid => ({{ account_id: aid, ready: true }}));
+              }}
+            }} catch(e) {{}}
+          }}
+          accounts.forEach(acc => {{
+            const opt = document.createElement('option');
+            opt.value = acc.account_id || acc;
+            opt.textContent = acc.account_id || acc;
+            sel.appendChild(opt);
+            const li = document.createElement('li');
+            li.className = 'rounded-lg border p-3 flex items-center justify-between';
+            const left = document.createElement('div');
+            const name = acc.account_id || acc;
+            const p1 = document.createElement('p');
+            p1.className = 'text-sm font-medium';
+            p1.textContent = name;
+            const p2 = document.createElement('p');
+            p2.className = 'text-xs text-gray-500';
+            const hasP = acc.cookies ? (acc.cookies.has_psid ? 'PSID' : 'no PSID') : '';
+            const hasT = acc.cookies ? (acc.cookies.has_psidts ? 'SIDTS' : 'no SIDTS') : '';
+            const ready = acc.ready ? 'ready' : (acc.error ? 'error' : 'not ready');
+            p2.textContent = [hasP, hasT, ready].filter(Boolean).join(' • ');
+            left.appendChild(p1);
+            left.appendChild(p2);
+            li.appendChild(left);
+            ul.appendChild(li);
+          }});
+        }}
+        document.getElementById('refreshAccountsBtn').addEventListener('click', loadAccounts);
+        loadAccounts();
+
+        document.getElementById('testAccountBtn').addEventListener('click', async () => {{
+          const el = document.getElementById('accMsg');
+          el.textContent = '';
+          try {{
+            const aid = document.getElementById('accSelect').value || 'primary';
+            const msg = document.getElementById('testMsg').value || 'Say OK';
+            const res = await fetch('/chat', {{ method: 'POST', headers: {{ 'Content-Type': 'application/json' }}, body: JSON.stringify({ message: msg, model: 'gemini-2.5-flash', account_id: aid }) }});
+            const data = await res.json();
+            if (data && data.success) {{
+              el.textContent = (data.response || 'OK');
+              el.className = 'text-sm text-green-600';
+            }} else {{
+              el.textContent = (data && data.error) ? data.error : 'Failed';
+              el.className = 'text-sm text-red-600';
+            }}
+          }} catch(e) {{
+            el.textContent = String(e);
+            el.className = 'text-sm text-red-600';
+          }}
+        }});
 
         document.getElementById('cookieForm').addEventListener('submit', async (ev) => {{
           ev.preventDefault();
@@ -611,7 +703,7 @@ async def list_models():
 async def send_message(request: MessageRequest):
     """Send a single message to Gemini with production error handling"""
     try:
-        client = await get_or_init_client()
+        client = await get_or_init_client(request.account_id)
         model = get_model_enum(request.model)
         
         try:
