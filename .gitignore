@@ -59,3 +59,6 @@ credentials.json
 
 # Gemini-API submodule (don't commit submodule)
 Gemini-API/
+
+.gemini/
+gha-creds-*.json
