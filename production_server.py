@@ -386,7 +386,7 @@ async def root():
                   </div>
                   <div class="mt-4">
                     <label class="block text-sm font-medium text-gray-700">Import Gems JSON</label>
-                    <textarea id="gems_json" class="mt-1 w-full h-32 rounded-md border border-gray-300 px-3 py-2 font-mono text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500" placeholder="[{\"name\": \"Gem\", \"id\": \"https://gemini.google.com/gem/ID\"}]"></textarea>
+                    <textarea id="gems_json" class="mt-1 w-full h-32 rounded-md border border-gray-300 px-3 py-2 font-mono text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500" placeholder="[{{\"name\": \"Gem\", \"id\": \"https://gemini.google.com/gem/ID\"}}]"></textarea>
                     <button id="importGemsBtn" class="mt-2 w-full inline-flex items-center justify-center rounded-md bg-indigo-600 text-white text-sm px-3 py-2 hover:bg-indigo-700">Import Gems</button>
                     <div id="gemsMsg" class="mt-2 text-sm"></div>
                   </div>
@@ -482,21 +482,6 @@ async def root():
               el.className = 'mt-3 text-sm text-green-600';
               loadHealth();
               loadAccounts();
-              try {
-                const aid = data.account_id || 'primary';
-                const sel = document.getElementById('accSelect');
-                try { localStorage.setItem('lastAccountId', aid); } catch(e) {}
-                if (sel) {
-                  const exists = Array.from(sel.options).some(o => o.value === aid);
-                  if (!exists) {
-                    const opt = document.createElement('option');
-                    opt.value = aid;
-                    opt.textContent = aid;
-                    sel.appendChild(opt);
-                  }
-                  sel.value = aid;
-                }
-              } catch(e) {}
             } else {
               el.textContent = (data && data.error) ? data.error : 'Update failed';
               el.className = 'mt-3 text-sm text-red-600';
@@ -576,8 +561,7 @@ async def root():
         </script>
       </body>
     </html>
-    """
-    html_content = html_content.replace("__ENV__", RAILWAY_ENVIRONMENT).replace("__TOKEN__", token_field)
+    """.replace("__ENV__", RAILWAY_ENVIRONMENT).replace("__TOKEN__", token_field)
     return HTMLResponse(content=html_content)
 
 
@@ -821,12 +805,12 @@ async def list_gems():
         try:
             client = await get_or_init_client()
             response = await client.generate_content(
-                prompt='''List ALL my custom Gems from gemini.google.com. Output ONLY valid JSON array of objects with keys name, id, desc.'''
+                prompt='''List ALL my custom Gems from gemini.google.com. Output ONLY valid JSON array of objects with keys name, id, desc.''',
                 model=Model.G_2_5_PRO
             )
             import re
             import json as _json
-            json_match = re.search(r'[\[\s*\{\[\s\S]*?\}\]\s*\]', response.text)
+            json_match = re.search(r'[\[\s*\{[\s\S]*?\}\s*\]]', response.text)
             if json_match:
                 generated = _json.loads(json_match.group())
         except Exception:
