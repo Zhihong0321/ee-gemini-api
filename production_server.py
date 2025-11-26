@@ -37,8 +37,8 @@ BASE_DIR = Path(__file__).parent
 set_log_level("WARNING")
 
 # Global client instance with lazy loading
-gemini_client: Optional[GeminiClient] = None
-chat_sessions: Dict[str, Any] = {}  
+clients: Dict[str, GeminiClient] = {}
+chat_sessions: Dict[str, Dict[str, Any]] = {}
 
 # Production environment variables
 RAILWAY_ENVIRONMENT = os.getenv("RAILWAY_ENVIRONMENT", "development")
@@ -53,6 +53,7 @@ class MessageRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=4000, description="Message to send to Gemini")
     model: str = Field(default="gemini-2.5-flash", description="Model to use")
     system_prompt: Optional[str] = Field(None, description="System prompt or full gem:// URL (e.g. from gemini.google.com/gem/ID share link). Create/edit Gems on web.")
+    account_id: Optional[str] = Field(None, description="Account ID to use (default: primary)")
 
 class ChatResponse(BaseModel):
     response: str
@@ -96,8 +97,20 @@ async def lifespan(app: FastAPI):
     
     # Shutdown
     logger.info("Shutting down Gemini API Server")
-    if gemini_client:
-        await gemini_client.close()
+    for _id, cli in list(clients.items()):
+        try:
+            await cli.close()
+        except Exception:
+            pass
+
+def _account_dir(account_id: str) -> Path:
+    return BASE_DIR / "data" / "accounts" / account_id
+
+def _cookies_path_for(account_id: str) -> Path:
+    return _account_dir(account_id) / "cookies.json"
+
+def _gems_path_for(account_id: str) -> Path:
+    return _account_dir(account_id) / "gems.json"
 
 def _load_cookies_from_store() -> Tuple[Optional[str], Optional[str]]:
     try:
@@ -136,46 +149,46 @@ def _persist_gems(gems: List[Dict[str, Any]]) -> None:
         raise HTTPException(status_code=500, detail="Unable to persist gems")
 
 
-def _get_stored_credentials() -> Tuple[Optional[str], Optional[str]]:
-    env_psid = os.getenv("SECURE_1PSID")
-    env_psidts = os.getenv("SECURE_1PSIDTS")
-    if env_psid:
-        return env_psid, env_psidts
-    return _load_cookies_from_store()
+def _get_stored_credentials_for(account_id: str) -> Tuple[Optional[str], Optional[str]]:
+    if account_id == "primary":
+        env_psid = os.getenv("SECURE_1PSID")
+        env_psidts = os.getenv("SECURE_1PSIDTS")
+        if env_psid:
+            return env_psid, env_psidts
+        return _load_cookies_from_store()
+    try:
+        p = _cookies_path_for(account_id)
+        if p.exists():
+            data = json.loads(p.read_text())
+            return data.get("SECURE_1PSID"), data.get("SECURE_1PSIDTS")
+    except Exception:
+        pass
+    return None, None
 
 
-async def get_or_init_client(force_reload: bool = False) -> GeminiClient:
-    """Get or initialize the Gemini client with error handling"""
-    global gemini_client
-    
-    if force_reload and gemini_client is not None:
-        await gemini_client.close()
-        gemini_client = None
-
-    if gemini_client is None:
-        secure_1psid, secure_1psidts = _get_stored_credentials()
-        
-        if not secure_1psid:
-            raise ValueError("SECURE_1PSID environment variable is required")
-        
+async def get_or_init_client(account_id: Optional[str] = None, force_reload: bool = False) -> GeminiClient:
+    account = (account_id or "primary").strip() or "primary"
+    if force_reload and account in clients:
         try:
-            gemini_client = GeminiClient(secure_1psid, secure_1psidts)
-            await gemini_client.init(auto_refresh=True)
-            logger.info("Gemini client initialized successfully")
+            await clients[account].close()
+        except Exception:
+            pass
+        clients.pop(account, None)
+    if account not in clients:
+        secure_1psid, secure_1psidts = _get_stored_credentials_for(account)
+        if not secure_1psid:
+            raise ValueError("SECURE_1PSID environment variable is required for this account")
+        try:
+            cli = GeminiClient(secure_1psid, secure_1psidts)
+            await cli.init(auto_refresh=True)
+            clients[account] = cli
+            if account not in chat_sessions:
+                chat_sessions[account] = {}
         except AuthError as e:
-            logger.error(f"Gemini authentication failed: {e}")
-            raise HTTPException(
-                status_code=503, 
-                detail="Service temporarily unavailable - authentication failed"
-            )
-        except Exception as e:
-            logger.error(f"Failed to initialize Gemini client: {e}")
-            raise HTTPException(
-                status_code=503, 
-                detail="Service temporarily unavailable"
-            )
-    
-    return gemini_client
+            raise HTTPException(status_code=503, detail="Service temporarily unavailable - authentication failed")
+        except Exception:
+            raise HTTPException(status_code=503, detail="Service temporarily unavailable")
+    return clients[account]
 
 def get_model_enum(model_name: str) -> Model:
     """Convert model name string to Model enum with validation"""
@@ -251,7 +264,7 @@ async def root():
             <input type=\"password\" id=\"token\" name=\"token\" placeholder=\"Enter token\" class=\"mt-1 w-full rounded-md border border-gray-300 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500\" required />
         """
 
-    html_content = f"""
+    html_content = """
     <!doctype html>
     <html lang=\"en\">
       <head>
@@ -274,7 +287,7 @@ async def root():
                 <div class=\"h-8 w-8 rounded-lg bg-indigo-600\"></div>
                 <div>
                   <h1 class=\"text-lg font-semibold\">Gemini API Server</h1>
-                  <p class=\"text-xs text-gray-500\">Environment: {RAILWAY_ENVIRONMENT}</p>
+                  <p class=\"text-xs text-gray-500\">Environment: __ENV__</p>
                 </div>
               </div>
               <div class=\"flex items-center gap-2\">
@@ -322,7 +335,9 @@ async def root():
                   <h2 class=\"text-base font-semibold\">Paste Cookie JSON</h2>
                   <p class=\"mt-1 text-xs text-gray-500\">Only __Secure-1PSID and __Secure-1PSIDTS are stored.</p>
                   <form id=\"cookieForm\" class=\"mt-4 space-y-3\">
-                    {token_field}
+                    __TOKEN__
+                    <label class=\"block text-sm font-medium text-gray-700\">Account ID</label>
+                    <input type=\"text\" id=\"account_id\" name=\"account_id\" placeholder=\"primary\" class=\"mt-1 w-full rounded-md border border-gray-300 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500\" />
                     <label class=\"block text-sm font-medium text-gray-700\">Cookie JSON</label>
                     <textarea name=\"cookie_json\" id=\"cookie_json\" class=\"mt-1 w-full h-40 rounded-md border border-gray-300 px-3 py-2 font-mono text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500\" placeholder=\"[{{}}]\" required></textarea>
                     <button type=\"submit\" class=\"w-full inline-flex items-center justify-center rounded-md bg-indigo-600 text-white text-sm px-3 py-2 hover:bg-indigo-700\">Update Cookies</button>
@@ -470,6 +485,7 @@ async def root():
       </body>
     </html>
     """
+    html_content = html_content.replace("__ENV__", RAILWAY_ENVIRONMENT).replace("__TOKEN__", token_field)
     return HTMLResponse(content=html_content)
 
 
@@ -510,7 +526,7 @@ async def cookie_form():
 
 
 @app.post("/cookies")
-async def update_cookies(cookie_json: str = Form(...), token: Optional[str] = Form(default=None)):
+async def update_cookies(cookie_json: str = Form(...), account_id: Optional[str] = Form(default="primary"), token: Optional[str] = Form(default=None)):
     """Accept cookie JSON, persist it, and reload the Gemini client."""
     if COOKIE_UPDATE_TOKEN and token != COOKIE_UPDATE_TOKEN:
         raise HTTPException(status_code=403, detail="Invalid admin token")
@@ -525,31 +541,36 @@ async def update_cookies(cookie_json: str = Form(...), token: Optional[str] = Fo
     if not secure_1psid:
         raise HTTPException(status_code=400, detail="__Secure-1PSID cookie not found")
 
-    os.environ["SECURE_1PSID"] = secure_1psid
-    if secure_1psidts:
-        os.environ["SECURE_1PSIDTS"] = secure_1psidts
+    if (account_id or "primary") == "primary":
+        os.environ["SECURE_1PSID"] = secure_1psid
+        if secure_1psidts:
+            os.environ["SECURE_1PSIDTS"] = secure_1psidts
+        _persist_cookies(secure_1psid, secure_1psidts)
+    else:
+        p = _cookies_path_for(account_id)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps({"SECURE_1PSID": secure_1psid, "SECURE_1PSIDTS": secure_1psidts}))
 
-    _persist_cookies(secure_1psid, secure_1psidts)
-
-    await get_or_init_client(force_reload=True)
+    await get_or_init_client(account_id, force_reload=True)
 
     return {
         "success": True,
         "message": "Gemini cookies updated successfully",
         "updated_at": datetime.utcnow().isoformat(),
-        "has_sidts": bool(secure_1psidts)
+        "has_sidts": bool(secure_1psidts),
+        "account_id": account_id or "primary"
     }
 
 @app.get("/health", response_model=StatusResponse)
 async def health_check():
     """Production health check for Railway monitoring"""
     try:
-        client_ready = gemini_client is not None
+        client_ready = len(clients) > 0
         return StatusResponse(
             status="healthy" if client_ready else "initializing",
             environment=RAILWAY_ENVIRONMENT,
             client_ready=client_ready,
-            active_sessions=len(chat_sessions),
+            active_sessions=sum(len(v) for v in chat_sessions.values()),
             uptime="running"
         )
     except Exception as e:
@@ -630,13 +651,15 @@ async def send_message(request: MessageRequest):
 async def send_chat_message(session_id: str, request: MessageRequest):
     """Send message in chat session with session management"""
     try:
-        client = await get_or_init_client()
+        client = await get_or_init_client(request.account_id)
         
         # Get or create chat session
-        if session_id not in chat_sessions:
-            chat_sessions[session_id] = client.start_chat()
-        
-        chat = chat_sessions[session_id]
+        acc = (request.account_id or "primary").strip() or "primary"
+        if acc not in chat_sessions:
+            chat_sessions[acc] = {}
+        if session_id not in chat_sessions[acc]:
+            chat_sessions[acc][session_id] = client.start_chat()
+        chat = chat_sessions[acc][session_id]
         model = get_model_enum(request.model)
         
         try:
@@ -685,7 +708,6 @@ async def send_chat_message(session_id: str, request: MessageRequest):
 async def create_chat_session():
     """Create new chat session with unique ID"""
     session_id = str(uuid.uuid4())
-    chat_sessions[session_id] = None  # Will be initialized on first message
     return {"session_id": session_id, "status": "created"}
 
 @app.delete("/chat/{session_id}")
