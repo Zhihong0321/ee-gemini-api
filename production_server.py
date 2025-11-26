@@ -329,6 +329,31 @@ async def root():
                   </form>
                   <div id=\"cookieMsg\" class=\"mt-3 text-sm\"></div>
                 </div>
+                <div class=\"mt-6 rounded-xl border bg-white p-6 shadow-sm\">
+                  <div class=\"flex items-center justify-between\">
+                    <h2 class=\"text-base font-semibold\">My Gems</h2>
+                    <button id=\"scanGemsBtn\" class=\"text-sm px-3 py-1.5 rounded-md border hover:bg-gray-50\">Scan Gems</button>
+                  </div>
+                  <div class=\"mt-3 grid grid-cols-2 gap-3\">
+                    <div class=\"rounded-lg border p-3\">
+                      <p class=\"text-xs text-gray-500\">Stored</p>
+                      <p id=\"gStored\" class=\"mt-1 text-sm font-medium\">0</p>
+                    </div>
+                    <div class=\"rounded-lg border p-3\">
+                      <p class=\"text-xs text-gray-500\">Merged</p>
+                      <p id=\"gMerged\" class=\"mt-1 text-sm font-medium\">0</p>
+                    </div>
+                  </div>
+                  <div class=\"mt-3\">
+                    <ul id=\"gemsList\" class=\"space-y-2\"></ul>
+                  </div>
+                  <div class=\"mt-4\">
+                    <label class=\"block text-sm font-medium text-gray-700\">Import Gems JSON</label>
+                    <textarea id=\"gems_json\" class=\"mt-1 w-full h-32 rounded-md border border-gray-300 px-3 py-2 font-mono text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500\" placeholder=\"[{\\\"name\\\": \\\"Gem\\\", \\\"id\\\": \\\"https://gemini.google.com/gem/ID\\\"}]\"></textarea>
+                    <button id=\"importGemsBtn\" class=\"mt-2 w-full inline-flex items-center justify-center rounded-md bg-indigo-600 text-white text-sm px-3 py-2 hover:bg-indigo-700\">Import Gems</button>
+                    <div id=\"gemsMsg\" class=\"mt-2 text-sm\"></div>
+                  </div>
+                </div>
               </section>
             </div>
           </main>
@@ -374,6 +399,73 @@ async def root():
             el.className = 'mt-3 text-sm text-red-600';
           }}
         }});
+
+        async function renderGems(data) {
+          try {
+            const stored = (data.stored || []);
+            const merged = (data.merged || []);
+            document.getElementById('gStored').textContent = String(stored.length);
+            document.getElementById('gMerged').textContent = String(merged.length);
+            const ul = document.getElementById('gemsList');
+            ul.innerHTML = '';
+            merged.forEach(g => {
+              const li = document.createElement('li');
+              li.className = 'rounded-lg border p-3 flex items-center justify-between';
+              const left = document.createElement('div');
+              const a = document.createElement('a');
+              a.href = g.id;
+              a.textContent = g.name || g.id;
+              a.target = '_blank';
+              a.className = 'text-sm font-medium text-indigo-600 hover:underline';
+              const small = document.createElement('p');
+              small.className = 'text-xs text-gray-500';
+              small.textContent = g.id;
+              left.appendChild(a);
+              left.appendChild(small);
+              const btn = document.createElement('button');
+              btn.className = 'text-xs px-2 py-1 rounded-md border hover:bg-gray-50';
+              btn.textContent = 'Copy ID';
+              btn.addEventListener('click', async () => {
+                try { await navigator.clipboard.writeText(g.id); } catch(e) {}
+              });
+              li.appendChild(left);
+              li.appendChild(btn);
+              ul.appendChild(li);
+            });
+          } catch(e) {}
+        }
+
+        async function loadGems() {
+          try {
+            const res = await fetch('/gems');
+            const data = await res.json();
+            await renderGems(data);
+          } catch(e) {}
+        }
+        document.getElementById('scanGemsBtn').addEventListener('click', loadGems);
+        loadGems();
+
+        document.getElementById('importGemsBtn').addEventListener('click', async () => {
+          const el = document.getElementById('gemsMsg');
+          el.textContent = '';
+          try {
+            const txt = document.getElementById('gems_json').value || '[]';
+            const arr = JSON.parse(txt);
+            const res = await fetch('/gems', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ gems: arr }) });
+            const data = await res.json();
+            if (data && data.success) {
+              el.textContent = 'Gems imported';
+              el.className = 'mt-2 text-sm text-green-600';
+              loadGems();
+            } else {
+              el.textContent = (data && data.error) ? data.error : 'Import failed';
+              el.className = 'mt-2 text-sm text-red-600';
+            }
+          } catch(e) {
+            el.textContent = String(e);
+            el.className = 'mt-2 text-sm text-red-600';
+          }
+        });
         </script>
       </body>
     </html>
@@ -648,7 +740,7 @@ class GemsPayload(BaseModel):
     gems: List[Dict[str, Any]]
 
 @app.post("/gems")
-async def import_gems(payload: GemsPayload, token: Optional[str] = Form(default=None)):
+async def import_gems(payload: GemsPayload, token: Optional[str] = None):
     if COOKIE_UPDATE_TOKEN and token is not None and token != COOKIE_UPDATE_TOKEN:
         raise HTTPException(status_code=403, detail="Invalid admin token")
     gems = payload.gems if isinstance(payload.gems, list) else []
