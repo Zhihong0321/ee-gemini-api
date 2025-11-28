@@ -165,6 +165,9 @@ class QueryQueueManager:
 # Global queue manager
 queue_manager = QueryQueueManager()
 
+# In-memory refresh sessions storage (fallback for Railway ephemeral storage)
+_in_memory_refresh_sessions: Dict[str, Dict[str, Any]] = {}
+
 # Simple cookie refresh scheduler to avoid circular imports
 class CookieRefreshScheduler:
     """Background task to refresh cookies proactively"""
@@ -232,13 +235,23 @@ class CookieRefreshScheduler:
     
     def _save_refresh_session(self, account_id: str, session_id: str, chat: Any) -> None:
         """Save refresh session data for a specific account"""
-        sessions = _load_refresh_sessions()
-        sessions[account_id] = {
-            "session_id": session_id,
-            "created_at": datetime.utcnow().isoformat(),
-            "last_used": datetime.utcnow().isoformat()
-        }
-        _save_refresh_sessions(sessions)
+        try:
+            sessions = _load_refresh_sessions()
+            sessions[account_id] = {
+                "session_id": session_id,
+                "created_at": datetime.utcnow().isoformat(),
+                "last_used": datetime.utcnow().isoformat()
+            }
+            _save_refresh_sessions(sessions)
+            logger.info(f"Saved refresh session for account: {account_id}")
+        except Exception as e:
+            logger.error(f"Failed to save refresh session for {account_id}: {e}")
+            # Still store in memory as fallback
+            _in_memory_refresh_sessions[account_id] = {
+                "session_id": session_id,
+                "created_at": datetime.utcnow().isoformat(),
+                "last_used": datetime.utcnow().isoformat()
+            }
     
     def _is_session_too_old(self, session_data: Dict[str, Any]) -> bool:
         """Check if session is older than 24 hours"""
@@ -267,6 +280,18 @@ class CookieRefreshScheduler:
         """Refresh all active Gemini clients using single persistent thread"""
         if not clients:
             logger.info("No clients to refresh")
+            return
+            
+        # Skip refresh sessions if disabled (for Railway ephemeral storage)
+        if DISABLE_REFRESH_SESSIONS:
+            logger.info("Refresh sessions disabled - using simple refresh method")
+            for account_id, client in list(clients.items()):
+                try:
+                    await client.generate_content("test", model=Model.G_2_5_FLASH)
+                    logger.info(f"Simple refresh for account: {account_id}")
+                    refresh_count += 1
+                except Exception as e:
+                    logger.error(f"Failed simple refresh for {account_id}: {e}")
             return
             
         refresh_count = 0
@@ -323,6 +348,8 @@ RAILWAY_ENVIRONMENT = os.getenv("RAILWAY_ENVIRONMENT", "development")
 PORT = int(os.getenv("PORT", "8000"))
 HOST = os.getenv("HOST", "0.0.0.0")
 COOKIE_UPDATE_TOKEN = os.getenv("COOKIE_UPDATE_TOKEN")
+# Disable refresh sessions on Railway to avoid ephemeral storage issues
+DISABLE_REFRESH_SESSIONS = os.getenv("DISABLE_REFRESH_SESSIONS", "false").lower() == "true"
 
 STORAGE_ROOT = Path(os.getenv("STORAGE_ROOT", "/session-cookie"))
 try:
@@ -498,23 +525,30 @@ def _persist_gems(gems: List[Dict[str, Any]]) -> None:
 
 
 def _load_refresh_sessions() -> Dict[str, Dict[str, Any]]:
-    """Load refresh session data from storage"""
+    """Load refresh session data from storage with in-memory fallback"""
     try:
         if REFRESH_SESSIONS_FILE.exists():
             data = json.loads(REFRESH_SESSIONS_FILE.read_text())
-            return data if isinstance(data, dict) else {}
+            # Update in-memory storage
+            _in_memory_refresh_sessions.update(data if isinstance(data, dict) else {})
+            return _in_memory_refresh_sessions
     except Exception as exc:
         logger.warning(f"Failed to read refresh sessions: {exc}")
-    return {}
+    
+    # Fallback to in-memory storage
+    return _in_memory_refresh_sessions
 
 
 def _save_refresh_sessions(sessions: Dict[str, Dict[str, Any]]) -> None:
-    """Save refresh session data to storage"""
+    """Save refresh session data to storage with in-memory fallback"""
     try:
         REFRESH_SESSIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
         REFRESH_SESSIONS_FILE.write_text(json.dumps(sessions, indent=2))
     except Exception as exc:
-        logger.error(f"Failed to save refresh sessions: {exc}")
+        logger.error(f"Failed to save refresh sessions to file: {exc}")
+    
+    # Always update in-memory storage
+    _in_memory_refresh_sessions.update(sessions)
 
 
 _GEM_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
