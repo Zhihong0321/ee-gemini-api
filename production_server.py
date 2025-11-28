@@ -1133,8 +1133,25 @@ async def health_check():
     """Production health check for Railway monitoring"""
     try:
         client_ready = len(clients) > 0
+        
+        # Verify storage is working by testing file operations
+        storage_working = False
+        try:
+            test_file = STORAGE_ROOT / ".health_test"
+            test_file.touch(exist_ok=True)
+            test_file.unlink()
+            storage_working = True
+        except Exception as e:
+            logger.error(f"Storage health check failed: {e}")
+        
+        status = "healthy"
+        if not client_ready:
+            status = "initializing"
+        elif not storage_working:
+            status = "storage_error"
+            
         return StatusResponse(
-            status="healthy" if client_ready else "initializing",
+            status=status,
             environment=RAILWAY_ENVIRONMENT,
             client_ready=client_ready,
             active_sessions=sum(len(v) for v in chat_sessions.values()),
@@ -1230,13 +1247,26 @@ async def storage_status():
                         "cookies_exist": cookie_path.exists()
                     })
         
+        # Test storage write/read
+        storage_test_passed = False
+        try:
+            test_file = STORAGE_ROOT / ".storage_test"
+            test_file.write_text("test")
+            test_file.unlink()
+            storage_test_passed = True
+        except Exception as e:
+            logger.error(f"Storage test failed: {e}")
+        
         return {
             "storage_root": str(STORAGE_ROOT),
             "cookies": cookies_info,
             "refresh_sessions": refresh_info,
             "accounts": accounts_info,
+            "storage_test": {
+                "passed": storage_test_passed,
+                "note": "FAIL = storage not working, SUCCESS = storage working"
+            },
             "settings": {
-                "disable_refresh_sessions": DISABLE_REFRESH_SESSIONS,
                 "environment": RAILWAY_ENVIRONMENT,
                 "storage_root": str(STORAGE_ROOT),
                 "cookies_file": str(COOKIES_FILE),
