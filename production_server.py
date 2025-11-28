@@ -81,8 +81,8 @@ class QueryQueueManager:
         """Process queued requests with rate limiting"""
         while self.running:
             try:
-                # Wait for a request
-                request_item = await asyncio.wait_for(self.request_queue.get(), timeout=1.0)
+                # Wait for a request (longer timeout to avoid missing requests)
+                request_item = await asyncio.wait_for(self.request_queue.get(), timeout=5.0)
                 
                 # Check rate limiting
                 now = datetime.utcnow()
@@ -118,16 +118,23 @@ class QueryQueueManager:
         """Execute a single request"""
         future, account_id, prompt, kwargs = request_item
         try:
-            # Execute the Gemini request
+            # Execute the Gemini request with timeout
             client = await get_or_init_client(account_id)
-            result = await client.generate_content(prompt=prompt, **kwargs)
+            result = await asyncio.wait_for(
+                client.generate_content(prompt=prompt, **kwargs),
+                timeout=50.0  # 50 seconds max for Gemini API
+            )
             
             # Set the result for the future
             future.set_result(result)
             
+        except asyncio.TimeoutError:
+            future.set_exception(Exception("Gemini API timeout"))
+            logger.warning(f"Gemini API timeout for account {account_id}")
         except Exception as e:
             # Set the exception for the future
             future.set_exception(e)
+            logger.error(f"Gemini API error for account {account_id}: {e}")
         finally:
             self.active_requests -= 1
             
@@ -139,11 +146,21 @@ class QueryQueueManager:
         # Create a future for the result
         future = asyncio.Future()
         
-        # Add to queue
-        await self.request_queue.put((future, account_id, prompt, kwargs))
+        # Add to queue with timeout (30 seconds max wait to get into queue)
+        try:
+            await asyncio.wait_for(
+                self.request_queue.put((future, account_id, prompt, kwargs)),
+                timeout=30.0
+            )
+        except asyncio.TimeoutError:
+            future.set_exception(Exception("Queue full, please try again later"))
+            raise HTTPException(status_code=503, detail="Service temporarily busy, please try again later")
         
-        # Wait for the result
-        return await future
+        # Wait for the result with timeout (60 seconds max for API call)
+        try:
+            return await asyncio.wait_for(future, timeout=60.0)
+        except asyncio.TimeoutError:
+            raise HTTPException(status_code=504, detail="Request timeout, please try again")
 
 # Global queue manager
 queue_manager = QueryQueueManager()
@@ -1125,6 +1142,12 @@ async def queue_status():
             "max_concurrent": queue_manager.max_concurrent,
             "rate_limit_per_minute": queue_manager.rate_limit_per_minute,
             "requests_in_last_minute": len(queue_manager.request_times),
+            "timeout_settings": {
+                "queue_timeout": 30,  # seconds to get into queue
+                "request_timeout": 60,  # seconds for total request
+                "gemini_timeout": 50,  # seconds for Gemini API call
+                "processor_timeout": 5  # seconds for queue processor
+            },
             "status": "active" if queue_manager.running else "inactive"
         }
     except Exception as e:
