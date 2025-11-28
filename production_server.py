@@ -927,6 +927,26 @@ async def send_chat_message(session_id: str, request: MessageRequest):
                 "alt": img.alt,
                 "type": "web" if hasattr(img, 'web_images') else "generated"
             })
+        
+        return ChatResponse(
+            response=response.text,
+            model=model.model_name,
+            session_id=session_id,
+            candidates_count=len(response.candidates),
+            thoughts=response.thoughts,
+            images=images,
+            metadata={
+                "rcid": response.rcid,
+                "chat_metadata_length": len(chat.metadata)
+            }
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected error in chat session: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
 async def get_shared_gem(gem_id: str):
     """Fetches a shared gem by its ID and returns its metadata."""
     if not gem_id or not _GEM_ID_PATTERN.match(gem_id):
