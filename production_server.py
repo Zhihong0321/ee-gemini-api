@@ -49,7 +49,7 @@ chat_sessions: Dict[str, Dict[str, Any]] = {}
 class QueryQueueManager:
     """Manages Gemini API requests with rate limiting and prevents race conditions"""
     
-    def __init__(self, max_concurrent: int = 3, rate_limit_per_minute: int = 30):
+    def __init__(self, max_concurrent: int = 5, rate_limit_per_minute: int = 60):  # Increased for speed
         self.max_concurrent = max_concurrent
         self.rate_limit_per_minute = rate_limit_per_minute
         self.request_queue = asyncio.Queue()
@@ -370,6 +370,7 @@ class MessageRequest(BaseModel):
     model: str = Field(default="gemini-2.5-flash", description="Model to use")
     system_prompt: Optional[str] = Field(None, description="System prompt or full gem:// URL (e.g. from gemini.google.com/gem/ID share link). Create/edit Gems on web.")
     account_id: Optional[str] = Field(None, description="Account ID to use (default: primary)")
+    include_thoughts: bool = Field(default=False, description="Include verbose thoughts in response (slower)")
 
 class ChatResponse(BaseModel):
     response: str
@@ -377,6 +378,7 @@ class ChatResponse(BaseModel):
     session_id: Optional[str] = None
     candidates_count: int
     thoughts: Optional[str] = None
+    raw: Optional[Dict[str, Any]] = None
     images: List[Dict[str, str]] = []
     metadata: Dict[str, Any] = {}
     success: bool = True
@@ -1212,17 +1214,34 @@ async def send_message(request: MessageRequest):
                 "type": "web" if hasattr(img, 'web_images') else "generated"
             })
         
-        return ChatResponse(
+        # Build response without thoughts by default for speed
+        chat_response = ChatResponse(
             response=response.text,
             model=model.model_name,
             candidates_count=len(response.candidates),
-            thoughts=response.thoughts,
+            thoughts=response.thoughts if request.include_thoughts else None,
             images=images,
             metadata={
                 "rcid": response.rcid,
                 "metadata_length": len(response.metadata)
             }
         )
+        
+        # Include raw data only if explicitly requested
+        if request.include_thoughts:
+            chat_response.raw = {
+                "response": response.text,
+                "model": model.model_name,
+                "candidates_count": len(response.candidates),
+                "thoughts": response.thoughts,
+                "images": images,
+                "metadata": {
+                    "rcid": response.rcid,
+                    "chat_metadata_length": len(response.metadata)
+                }
+            }
+        
+        return chat_response
         
     except HTTPException:
         raise
@@ -1274,18 +1293,36 @@ async def send_chat_message(session_id: str, request: MessageRequest):
                 "type": "web" if hasattr(img, 'web_images') else "generated"
             })
         
-        return ChatResponse(
+        # Build response without thoughts by default for speed
+        chat_response = ChatResponse(
             response=response.text,
             model=model.model_name,
             session_id=session_id,
             candidates_count=len(response.candidates),
-            thoughts=response.thoughts,
+            thoughts=response.thoughts if request.include_thoughts else None,
             images=images,
             metadata={
                 "rcid": response.rcid,
                 "chat_metadata_length": len(chat.metadata)
             }
         )
+        
+        # Include raw data only if explicitly requested
+        if request.include_thoughts:
+            chat_response.raw = {
+                "response": response.text,
+                "model": model.model_name,
+                "session_id": session_id,
+                "candidates_count": len(response.candidates),
+                "thoughts": response.thoughts,
+                "images": images,
+                "metadata": {
+                    "rcid": response.rcid,
+                    "chat_metadata_length": len(chat.metadata)
+                }
+            }
+        
+        return chat_response
         
     except HTTPException:
         raise
