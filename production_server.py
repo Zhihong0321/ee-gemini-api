@@ -118,9 +118,6 @@ class QueryQueueManager:
         """Execute a single request"""
         future, account_id, prompt, kwargs = request_item
         try:
-            # Reset the scheduler refresh counter on any API call
-            scheduler._reset_refresh_timer()
-            
             # Execute the Gemini request
             client = await get_or_init_client(account_id)
             result = await client.generate_content(prompt=prompt, **kwargs)
