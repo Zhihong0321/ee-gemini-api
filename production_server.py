@@ -28,6 +28,9 @@ from gemini_webapi import GeminiClient, set_log_level
 from gemini_webapi.constants import Model
 from gemini_webapi.exceptions import APIError, AuthError, UsageLimitExceeded, ModelInvalid, TemporarilyBlocked
 
+# Import the cookie refresh scheduler
+from cookie_refresh_scheduler import scheduler
+
 # Configure production logging
 logging.basicConfig(
     level=logging.INFO,
@@ -133,10 +136,26 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Failed to initialize Gemini client: {e}")
     
+    # Start the cookie refresh scheduler
+    try:
+        await scheduler.start()
+        logger.info("Cookie refresh scheduler started")
+    except Exception as e:
+        logger.error(f"Failed to start cookie refresh scheduler: {e}")
+    
     yield
     
     # Shutdown
     logger.info("Shutting down Gemini API Server")
+    
+    # Stop the scheduler first
+    try:
+        await scheduler.stop()
+        logger.info("Cookie refresh scheduler stopped")
+    except Exception as e:
+        logger.error(f"Error stopping cookie refresh scheduler: {e}")
+    
+    # Close all clients
     for _id, cli in list(clients.items()):
         try:
             await cli.close()
@@ -790,6 +809,21 @@ async def health_check():
         logger.error(f"Health check failed: {e}")
         raise HTTPException(status_code=503, detail="Service unavailable")
 
+@app.get("/scheduler/health")
+async def scheduler_health():
+    """Dedicated endpoint to check cookie refresh scheduler status"""
+    try:
+        return {
+            "scheduler_running": scheduler.running,
+            "refresh_interval_minutes": scheduler.refresh_interval // 60,
+            "active_clients": len(clients),
+            "last_refresh": datetime.utcnow().isoformat() if scheduler.running else "never",
+            "status": "active" if scheduler.running else "inactive"
+        }
+    except Exception as e:
+        logger.error(f"Scheduler health check failed: {e}")
+        return {"error": str(e), "status": "unknown"}
+
 @app.get("/models", response_model=List[Dict[str, Any]])
 async def list_models():
     """List available models with availability info"""
@@ -893,31 +927,72 @@ async def send_chat_message(session_id: str, request: MessageRequest):
                 "alt": img.alt,
                 "type": "web" if hasattr(img, 'web_images') else "generated"
             })
+async def get_shared_gem(gem_id: str):
+    """Fetches a shared gem by its ID and returns its metadata."""
+    if not gem_id or not _GEM_ID_PATTERN.match(gem_id):
+        raise HTTPException(status_code=400, detail="Invalid gem_id format")
+    
+    url = f"https://gemini.google.com/gem/{gem_id}"
+    
+    try:
+        # Use any available client to make the HTTP request
+        client = await get_or_init_client()
         
-        return ChatResponse(
-            response=response.text,
-            model=model.model_name,
-            session_id=session_id,
-            candidates_count=len(response.candidates),
-            thoughts=response.thoughts,
-            images=images,
-            metadata={
-                "rcid": response.rcid,
-                "chat_metadata_length": len(chat.metadata)
+        async with client.client.get(url) as response:
+            if response.status != 200:
+                raise HTTPException(status_code=response.status, detail="Failed to fetch gem data")
+            
+            html_content = await response.text()
+            
+            # Use BeautifulSoup to parse the HTML
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(html_content, 'html.parser')
+            
+            # Extract the data from the script tag
+            script_tag = soup.find('script', {'id': '__NEXT_DATA__'})
+            if not script_tag:
+                raise HTTPException(status_code=500, detail="Failed to find gem data in page")
+                
+            next_data = json.loads(script_tag.string)
+            gem_data = next_data.get('props', {}).get('pageProps', {}).get('gem')
+            
+            if not gem_data:
+                raise HTTPException(status_code=404, detail="Gem not found or not public")
+
+            return {
+                "id": gem_data.get('id'),
+                "name": gem_data.get('name'),
+                "description": gem_data.get('description'),
+                "author": gem_data.get('author'),
+                "public": gem_data.get('public'),
+                "predefined": gem_data.get('predefined'),
+                "url": url
             }
-        )
-        
+
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Unexpected error in chat session: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+        logger.error(f"Error fetching shared gem: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error while fetching gem")
+
 
 @app.post("/chat/new", response_model=Dict[str, str])
 async def create_chat_session():
     """Create new chat session with unique ID"""
     session_id = str(uuid.uuid4())
     return {"session_id": session_id, "status": "created"}
+
+@app.get("/gems/shared/{gem_id}")
+async def get_shared_gem_endpoint(gem_id: str):
+    """Endpoint to fetch a shared gem by its ID."""
+    try:
+        gem_data = await get_shared_gem(gem_id)
+        return gem_data
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Failed to get shared gem: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get shared gem")
 
 @app.delete("/chat/{session_id}")
 async def delete_chat_session(session_id: str):
@@ -1016,6 +1091,10 @@ async def detailed_status():
             "environment": RAILWAY_ENVIRONMENT,
             "server_uptime": "running",
             "accounts": list(clients.keys()),
+            "cookie_scheduler": {
+                "running": scheduler.running,
+                "refresh_interval_minutes": scheduler.refresh_interval // 60
+            }
         }
         # Pick any available client to test
         test_client = None

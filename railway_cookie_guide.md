@@ -3,16 +3,18 @@
 ## 🔄 Updating Session Tokens
 
 ### **Automatic Refresh (Recommended)**
-Your Railway deployment has automatic cookie refresh enabled:
+Your Railway deployment has proactive cookie refresh enabled:
 ```python
-# In production_server.py
-await client.init(auto_refresh=True)  # ✅ Already configured
+# In cookie_refresh_scheduler.py
+# Dedicated background task runs every 9 minutes
+# Proactively refreshes all client sessions
 ```
 
 **Benefits:**
-- ⚡ Runs every 9 minutes in background
-- ⚡ No manual intervention needed
-- ⚡ Railway service stays available
+- ⚡ Runs every 9 minutes in background (dedicated scheduler)
+- ⚡ Works even without API requests
+- ⚡ Railway service stays available overnight
+- ⚡ Multiple accounts supported
 
 ### **When You Need Manual Updates**
 
@@ -54,16 +56,22 @@ curl https://your-app.up.railway.app/health
 
 # Expected healthy response:
 {"status":"healthy","client_ready":true,"active_sessions":0}
-```
 
-### **Detailed Status**
-```bash
-# Full status with cookie info
+# Check detailed status with scheduler info:
 curl https://your-app.up.railway.app/status
 
 # Look for:
 # - "client_initialized": true
 # - "api_test": "passed"
+# - "cookie_scheduler": {"running": true, "refresh_interval_minutes": 9}
+```
+
+### **Monitoring Cookie Refresh**
+The scheduler logs all refresh attempts. Check Railway logs for:
+```
+Started cookie refresh scheduler (every 9 minutes)
+Successfully refreshed 1 account(s) at 2024-01-01T12:00:00.000Z
+Refreshed cookies for account: primary
 ```
 
 ## 🕰️ Cookie Lifecycle
@@ -75,7 +83,7 @@ curl https://your-app.up.railway.app/status
 
 ### **Automatic Refresh Handling:**
 ```
-Every 9 minutes → Check 1PSIDTS → If expired → Refresh → Continue service
+Background Scheduler (every 9 min) → Lightweight API call → Triggers auto_refresh → All clients refreshed → Service continues
 ```
 
 ## 🛡️ Backup Strategies
@@ -138,6 +146,13 @@ async def health_check():
 3. Restart Railway service manually
 4. Test cookies locally first
 
+### **Problem:** Cookies Still Expire Overnight
+**Solution:**
+1. Check `/status` endpoint for scheduler status
+2. Look for "cookie_scheduler": {"running": true} in response
+3. Check Railway logs for refresh attempts
+4. If scheduler not running, redeploy to restart service
+
 ## 📞 Monitoring & Alerts
 
 ### **Health Check Frequency**
@@ -182,8 +197,9 @@ def send_alert(message):
 2. **Keep backup cookies ready**
 3. **Monitor for 401/403 errors**
 4. **Set up health check alerts**
-5. **Use automatic refresh (enabled by default)**
-6. **Document your refresh process**
+5. **Use proactive refresh scheduler (runs every 9 minutes)**
+6. **Check /status endpoint for scheduler health**
+7. **Document your refresh process**
 
 ## 🔄 Quick Reference Commands
 
