@@ -165,8 +165,7 @@ class QueryQueueManager:
 # Global queue manager
 queue_manager = QueryQueueManager()
 
-# In-memory refresh sessions storage (fallback for Railway ephemeral storage)
-_in_memory_refresh_sessions: Dict[str, Dict[str, Any]] = {}
+
 
 # Simple cookie refresh scheduler to avoid circular imports
 class CookieRefreshScheduler:
@@ -348,10 +347,10 @@ RAILWAY_ENVIRONMENT = os.getenv("RAILWAY_ENVIRONMENT", "development")
 PORT = int(os.getenv("PORT", "8000"))
 HOST = os.getenv("HOST", "0.0.0.0")
 COOKIE_UPDATE_TOKEN = os.getenv("COOKIE_UPDATE_TOKEN")
-# Disable refresh sessions on Railway to avoid ephemeral storage issues
-DISABLE_REFRESH_SESSIONS = os.getenv("DISABLE_REFRESH_SESSIONS", "false").lower() == "true"
 
-STORAGE_ROOT = Path(os.getenv("STORAGE_ROOT", "/session-cookie"))
+
+# Use actual persistent volume mounted at /app/session-cookie
+STORAGE_ROOT = Path(os.getenv("STORAGE_ROOT", "/app/session-cookie"))
 try:
     STORAGE_ROOT.mkdir(parents=True, exist_ok=True)
 except Exception as exc:
@@ -525,30 +524,23 @@ def _persist_gems(gems: List[Dict[str, Any]]) -> None:
 
 
 def _load_refresh_sessions() -> Dict[str, Dict[str, Any]]:
-    """Load refresh session data from storage with in-memory fallback"""
+    """Load refresh session data from storage"""
     try:
         if REFRESH_SESSIONS_FILE.exists():
             data = json.loads(REFRESH_SESSIONS_FILE.read_text())
-            # Update in-memory storage
-            _in_memory_refresh_sessions.update(data if isinstance(data, dict) else {})
-            return _in_memory_refresh_sessions
+            return data if isinstance(data, dict) else {}
     except Exception as exc:
         logger.warning(f"Failed to read refresh sessions: {exc}")
-    
-    # Fallback to in-memory storage
-    return _in_memory_refresh_sessions
+    return {}
 
 
 def _save_refresh_sessions(sessions: Dict[str, Dict[str, Any]]) -> None:
-    """Save refresh session data to storage with in-memory fallback"""
+    """Save refresh session data to storage"""
     try:
         REFRESH_SESSIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
         REFRESH_SESSIONS_FILE.write_text(json.dumps(sessions, indent=2))
     except Exception as exc:
-        logger.error(f"Failed to save refresh sessions to file: {exc}")
-    
-    # Always update in-memory storage
-    _in_memory_refresh_sessions.update(sessions)
+        logger.error(f"Failed to save refresh sessions: {exc}")
 
 
 _GEM_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
@@ -1189,6 +1181,71 @@ async def queue_status():
     except Exception as e:
         logger.error(f"Queue status check failed: {e}")
         return {"error": str(e), "status": "unknown"}
+
+@app.get("/storage/status")
+async def storage_status():
+    """Check what's stored in persistent storage"""
+    try:
+        # Check cookies
+        cookies_info = {}
+        if COOKIES_FILE.exists():
+            try:
+                data = json.loads(COOKIES_FILE.read_text())
+                cookies_info = {
+                    "file_exists": True,
+                    "has_psid": bool(data.get("SECURE_1PSID")),
+                    "has_psidts": bool(data.get("SECURE_1PSIDTS")),
+                    "size_bytes": len(json.dumps(data))
+                }
+            except Exception as e:
+                cookies_info = {"file_exists": True, "error": str(e)}
+        else:
+            cookies_info = {"file_exists": False}
+        
+        # Check refresh sessions
+        refresh_info = {}
+        if REFRESH_SESSIONS_FILE.exists():
+            try:
+                sessions = json.loads(REFRESH_SESSIONS_FILE.read_text())
+                refresh_info = {
+                    "file_exists": True,
+                    "sessions_count": len(sessions),
+                    "sessions": sessions,
+                    "in_memory_fallback": _in_memory_refresh_sessions
+                }
+            except Exception as e:
+                refresh_info = {"file_exists": True, "error": str(e)}
+        else:
+            refresh_info = {"file_exists": False, "in_memory_fallback": _in_memory_refresh_sessions}
+        
+        # Check account directories
+        accounts_info = {"accounts": []}
+        acc_dir = STORAGE_ROOT / "accounts"
+        if acc_dir.exists():
+            for account in acc_dir.iterdir():
+                if account.is_dir():
+                    cookie_path = account / "cookies.json"
+                    accounts_info["accounts"].append({
+                        "account_id": account.name,
+                        "cookies_exist": cookie_path.exists()
+                    })
+        
+        return {
+            "storage_root": str(STORAGE_ROOT),
+            "cookies": cookies_info,
+            "refresh_sessions": refresh_info,
+            "accounts": accounts_info,
+            "settings": {
+                "disable_refresh_sessions": DISABLE_REFRESH_SESSIONS,
+                "environment": RAILWAY_ENVIRONMENT,
+                "storage_root": str(STORAGE_ROOT),
+                "cookies_file": str(COOKIES_FILE),
+                "sessions_file": str(REFRESH_SESSIONS_FILE)
+            }
+        }
+    except Exception as e:
+        logger.error(f"Storage status check failed: {e}")
+        return {"error": str(e), "storage_root": str(STORAGE_ROOT)}
 
 @app.get("/models", response_model=List[Dict[str, Any]])
 async def list_models():
