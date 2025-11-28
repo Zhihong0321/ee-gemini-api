@@ -45,6 +45,112 @@ set_log_level("WARNING")
 clients: Dict[str, GeminiClient] = {}
 chat_sessions: Dict[str, Dict[str, Any]] = {}
 
+# Query queue manager to handle rate limiting and race conditions
+class QueryQueueManager:
+    """Manages Gemini API requests with rate limiting and prevents race conditions"""
+    
+    def __init__(self, max_concurrent: int = 3, rate_limit_per_minute: int = 30):
+        self.max_concurrent = max_concurrent
+        self.rate_limit_per_minute = rate_limit_per_minute
+        self.request_queue = asyncio.Queue()
+        self.active_requests = 0
+        self.request_times = []  # Track request times for rate limiting
+        self.processor_task = None
+        self.running = False
+        
+    async def start(self):
+        """Start the queue processor"""
+        if self.running:
+            return
+        self.running = True
+        self.processor_task = asyncio.create_task(self._process_queue())
+        logger.info("Query queue manager started")
+        
+    async def stop(self):
+        """Stop the queue processor"""
+        self.running = False
+        if self.processor_task:
+            self.processor_task.cancel()
+            try:
+                await self.processor_task
+            except asyncio.CancelledError:
+                pass
+        logger.info("Query queue manager stopped")
+        
+    async def _process_queue(self):
+        """Process queued requests with rate limiting"""
+        while self.running:
+            try:
+                # Wait for a request
+                request_item = await asyncio.wait_for(self.request_queue.get(), timeout=1.0)
+                
+                # Check rate limiting
+                now = datetime.utcnow()
+                # Remove requests older than 1 minute
+                self.request_times = [t for t in self.request_times if (now - t).total_seconds() < 60]
+                
+                # If we've hit the rate limit, wait
+                if len(self.request_times) >= self.rate_limit_per_minute:
+                    sleep_time = 60 - (now - self.request_times[0]).total_seconds()
+                    if sleep_time > 0:
+                        await asyncio.sleep(sleep_time)
+                        continue
+                
+                # Wait for available slot
+                while self.active_requests >= self.max_concurrent:
+                    await asyncio.sleep(0.1)
+                
+                # Process the request
+                self.active_requests += 1
+                self.request_times.append(now)
+                
+                asyncio.create_task(self._execute_request(request_item))
+                
+            except asyncio.TimeoutError:
+                continue
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Error in queue processor: {e}")
+                await asyncio.sleep(1)
+                
+    async def _execute_request(self, request_item):
+        """Execute a single request"""
+        future, account_id, prompt, kwargs = request_item
+        try:
+            # Reset the scheduler refresh counter on any API call
+            scheduler._reset_refresh_timer()
+            
+            # Execute the Gemini request
+            client = await get_or_init_client(account_id)
+            result = await client.generate_content(prompt=prompt, **kwargs)
+            
+            # Set the result for the future
+            future.set_result(result)
+            
+        except Exception as e:
+            # Set the exception for the future
+            future.set_exception(e)
+        finally:
+            self.active_requests -= 1
+            
+    async def submit_request(self, account_id: str, prompt: str, **kwargs):
+        """Submit a request to the queue and return the result"""
+        if not self.running:
+            await self.start()
+            
+        # Create a future for the result
+        future = asyncio.Future()
+        
+        # Add to queue
+        await self.request_queue.put((future, account_id, prompt, kwargs))
+        
+        # Wait for the result
+        return await future
+
+# Global queue manager
+queue_manager = QueryQueueManager()
+
 # Simple cookie refresh scheduler to avoid circular imports
 class CookieRefreshScheduler:
     """Background task to refresh cookies proactively"""
@@ -53,6 +159,8 @@ class CookieRefreshScheduler:
         self.refresh_interval = refresh_interval_minutes * 60  # Convert to seconds
         self.running = False
         self.task = None
+        self.last_refresh_time = datetime.utcnow()
+        self.refresh_lock = asyncio.Lock()
         
     async def start(self):
         """Start the background refresh scheduler"""
@@ -75,24 +183,74 @@ class CookieRefreshScheduler:
                 pass
         logger.info("Stopped cookie refresh scheduler")
         
+    async def _reset_refresh_timer(self):
+        """Reset the refresh timer to delay next refresh"""
+        async with self.refresh_lock:
+            self.last_refresh_time = datetime.utcnow()
+            logger.debug(f"Refresh timer reset at {self.last_refresh_time.isoformat()}")
+    
     async def _refresh_loop(self):
         """Main refresh loop that runs periodically"""
         while self.running:
             try:
-                await asyncio.sleep(self.refresh_interval)
+                # Calculate time until next refresh
+                time_since_refresh = (datetime.utcnow() - self.last_refresh_time).total_seconds()
+                time_until_refresh = max(0, self.refresh_interval - time_since_refresh)
+                
+                # Wait until next refresh time
+                await asyncio.sleep(time_until_refresh)
                 if not self.running:
                     break
                     
                 await self._refresh_all_clients()
+                self.last_refresh_time = datetime.utcnow()
                 
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error(f"Error in cookie refresh loop: {e}")
                 await asyncio.sleep(60)  # Wait a minute before retrying
+    
+    def _load_refresh_session(self, account_id: str) -> Optional[Dict[str, Any]]:
+        """Load refresh session data for a specific account"""
+        sessions = _load_refresh_sessions()
+        return sessions.get(account_id)
+    
+    def _save_refresh_session(self, account_id: str, session_id: str, chat: Any) -> None:
+        """Save refresh session data for a specific account"""
+        sessions = _load_refresh_sessions()
+        sessions[account_id] = {
+            "session_id": session_id,
+            "created_at": datetime.utcnow().isoformat(),
+            "last_used": datetime.utcnow().isoformat()
+        }
+        _save_refresh_sessions(sessions)
+    
+    def _is_session_too_old(self, session_data: Dict[str, Any]) -> bool:
+        """Check if session is older than 24 hours"""
+        if not session_data or "created_at" not in session_data:
+            return True
+        
+        try:
+            created_at = datetime.fromisoformat(session_data["created_at"])
+            age_hours = (datetime.utcnow() - created_at).total_seconds() / 3600
+            return age_hours > 24
+        except (ValueError, KeyError):
+            return True
+    
+    def _get_minimal_question(self) -> str:
+        """Generate ultra-minimal math question"""
+        import random
+        operations = [
+            (random.randint(1, 10), "+", random.randint(1, 10)),
+            (random.randint(1, 10), "×", random.randint(1, 10)),
+        ]
+        a, op, b = random.choice(operations)
+        result = a + b if op == "+" else a * b
+        return f"{a}{op}{b}={result}?"
                 
     async def _refresh_all_clients(self):
-        """Refresh all active Gemini clients"""
+        """Refresh all active Gemini clients using single persistent thread"""
         if not clients:
             logger.info("No clients to refresh")
             return
@@ -100,11 +258,40 @@ class CookieRefreshScheduler:
         refresh_count = 0
         for account_id, client in list(clients.items()):
             try:
-                # Make a lightweight request to trigger auto-refresh
-                await client.generate_content(
-                    "test",  # Minimal request to trigger refresh
-                    model=Model.G_2_5_FLASH
-                )
+                # Load or create refresh session
+                session_data = self._load_refresh_session(account_id)
+                
+                # Check if session is too old (>24h) or doesn't exist
+                if not session_data or self._is_session_too_old(session_data):
+                    # Create new session
+                    chat = client.start_chat()
+                    session_id = str(uuid.uuid4())
+                    
+                    # Store in memory for future reuse
+                    if account_id not in chat_sessions:
+                        chat_sessions[account_id] = {}
+                    chat_sessions[account_id][session_id] = chat
+                    
+                    # Save to persistent storage
+                    self._save_refresh_session(account_id, session_id, chat)
+                    logger.info(f"Created new refresh session for account: {account_id}")
+                else:
+                    # Reuse existing session
+                    session_id = session_data["session_id"]
+                    if session_id not in chat_sessions.get(account_id, {}):
+                        chat_sessions.setdefault(account_id, {})[session_id] = client.start_chat()
+                    chat = chat_sessions[account_id][session_id]
+                
+                # Send ultra-minimal question to refresh cookies
+                question = self._get_minimal_question()
+                await chat.send_message(question)
+                
+                # Update last used time
+                sessions = _load_refresh_sessions()
+                if account_id in sessions:
+                    sessions[account_id]["last_used"] = datetime.utcnow().isoformat()
+                    _save_refresh_sessions(sessions)
+                
                 refresh_count += 1
                 logger.info(f"Refreshed cookies for account: {account_id}")
                 
@@ -131,6 +318,7 @@ except Exception as exc:
 
 COOKIES_FILE = Path(os.getenv("COOKIE_STORE_PATH", str(STORAGE_ROOT / "cookies.json")))
 GEMS_FILE = Path(os.getenv("GEMS_STORE_PATH", str(STORAGE_ROOT / "gems.json")))
+REFRESH_SESSIONS_FILE = Path(os.getenv("REFRESH_SESSIONS_PATH", str(STORAGE_ROOT / "refresh_sessions.json")))
 
 
 def _ensure_writable_dir(dir_path: Path) -> None:
@@ -214,6 +402,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Failed to start cookie refresh scheduler: {e}")
     
+    # Start the query queue manager
+    try:
+        await queue_manager.start()
+        logger.info("Query queue manager started")
+    except Exception as e:
+        logger.error(f"Failed to start query queue manager: {e}")
+    
     yield
     
     # Shutdown
@@ -225,6 +420,13 @@ async def lifespan(app: FastAPI):
         logger.info("Cookie refresh scheduler stopped")
     except Exception as e:
         logger.error(f"Error stopping cookie refresh scheduler: {e}")
+    
+    # Stop the queue manager
+    try:
+        await queue_manager.stop()
+        logger.info("Query queue manager stopped")
+    except Exception as e:
+        logger.error(f"Error stopping query queue manager: {e}")
     
     # Close all clients
     for _id, cli in list(clients.items()):
@@ -277,6 +479,26 @@ def _persist_gems(gems: List[Dict[str, Any]]) -> None:
         GEMS_FILE.write_text(json.dumps(gems))
     except Exception:
         raise HTTPException(status_code=500, detail="Unable to persist gems")
+
+
+def _load_refresh_sessions() -> Dict[str, Dict[str, Any]]:
+    """Load refresh session data from storage"""
+    try:
+        if REFRESH_SESSIONS_FILE.exists():
+            data = json.loads(REFRESH_SESSIONS_FILE.read_text())
+            return data if isinstance(data, dict) else {}
+    except Exception as exc:
+        logger.warning(f"Failed to read refresh sessions: {exc}")
+    return {}
+
+
+def _save_refresh_sessions(sessions: Dict[str, Dict[str, Any]]) -> None:
+    """Save refresh session data to storage"""
+    try:
+        REFRESH_SESSIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        REFRESH_SESSIONS_FILE.write_text(json.dumps(sessions, indent=2))
+    except Exception as exc:
+        logger.error(f"Failed to save refresh sessions: {exc}")
 
 
 _GEM_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
@@ -888,11 +1110,28 @@ async def scheduler_health():
             "scheduler_running": scheduler.running,
             "refresh_interval_minutes": scheduler.refresh_interval // 60,
             "active_clients": len(clients),
-            "last_refresh": datetime.utcnow().isoformat() if scheduler.running else "never",
+            "last_refresh": scheduler.last_refresh_time.isoformat() if scheduler.running else "never",
             "status": "active" if scheduler.running else "inactive"
         }
     except Exception as e:
         logger.error(f"Scheduler health check failed: {e}")
+        return {"error": str(e), "status": "unknown"}
+
+@app.get("/queue/status")
+async def queue_status():
+    """Check queue manager status"""
+    try:
+        return {
+            "queue_running": queue_manager.running,
+            "active_requests": queue_manager.active_requests,
+            "queue_size": queue_manager.request_queue.qsize(),
+            "max_concurrent": queue_manager.max_concurrent,
+            "rate_limit_per_minute": queue_manager.rate_limit_per_minute,
+            "requests_in_last_minute": len(queue_manager.request_times),
+            "status": "active" if queue_manager.running else "inactive"
+        }
+    except Exception as e:
+        logger.error(f"Queue status check failed: {e}")
         return {"error": str(e), "status": "unknown"}
 
 @app.get("/models", response_model=List[Dict[str, Any]])
@@ -916,15 +1155,23 @@ async def list_models():
 async def send_message(request: MessageRequest):
     """Send a single message to Gemini with production error handling"""
     try:
-        client = await get_or_init_client(request.account_id)
+        account_id = request.account_id or "primary"
         model = get_model_enum(request.model)
         
+        # Build prompt kwargs
+        kw, _ = _build_prompt_kwargs(model, request.system_prompt)
+        
         try:
-            kw, _ = _build_prompt_kwargs(model, request.system_prompt)
-            response = await client.generate_content(
+            # Use the queue manager to send the request
+            response = await queue_manager.submit_request(
+                account_id=account_id,
                 prompt=request.message,
                 **kw
             )
+            
+            # Reset the refresh timer on successful response
+            await scheduler._reset_refresh_timer()
+            
         except UsageLimitExceeded as e:
             logger.warning(f"Rate limit exceeded: {e}")
             raise HTTPException(status_code=429, detail="Rate limit exceeded. Please try again later.")
@@ -967,10 +1214,10 @@ async def send_message(request: MessageRequest):
 async def send_chat_message(session_id: str, request: MessageRequest):
     """Send message in chat session with session management"""
     try:
-        client = await get_or_init_client(request.account_id)
+        acc = (request.account_id or "primary").strip() or "primary"
+        client = await get_or_init_client(acc)
         
         # Get or create chat session
-        acc = (request.account_id or "primary").strip() or "primary"
         if acc not in chat_sessions:
             chat_sessions[acc] = {}
         if session_id not in chat_sessions[acc]:
@@ -983,7 +1230,15 @@ async def send_chat_message(session_id: str, request: MessageRequest):
             chat.model = kw["model"]
             if gem_id:
                 chat.gem = gem_id
+            
+            # Use the queue manager for session messages as well
+            # Note: For chat sessions, we need to handle this differently
+            # since we can't directly use the queue manager with chat sessions
             response = await chat.send_message(prompt=request.message)
+            
+            # Reset the refresh timer on successful response
+            await scheduler._reset_refresh_timer()
+            
         except UsageLimitExceeded as e:
             raise HTTPException(status_code=429, detail="Rate limit exceeded")
         except TemporarilyBlocked as e:
