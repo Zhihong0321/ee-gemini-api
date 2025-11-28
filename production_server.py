@@ -244,13 +244,8 @@ class CookieRefreshScheduler:
             _save_refresh_sessions(sessions)
             logger.info(f"Saved refresh session for account: {account_id}")
         except Exception as e:
-            logger.error(f"Failed to save refresh session for {account_id}: {e}")
-            # Still store in memory as fallback
-            _in_memory_refresh_sessions[account_id] = {
-                "session_id": session_id,
-                "created_at": datetime.utcnow().isoformat(),
-                "last_used": datetime.utcnow().isoformat()
-            }
+            logger.error(f"FAILED to save refresh session to storage: {e}")
+            raise HTTPException(status_code=500, detail="Storage failure - cannot continue")
     
     def _is_session_too_old(self, session_data: Dict[str, Any]) -> bool:
         """Check if session is older than 24 hours"""
@@ -281,17 +276,7 @@ class CookieRefreshScheduler:
             logger.info("No clients to refresh")
             return
             
-        # Skip refresh sessions if disabled (for Railway ephemeral storage)
-        if DISABLE_REFRESH_SESSIONS:
-            logger.info("Refresh sessions disabled - using simple refresh method")
-            for account_id, client in list(clients.items()):
-                try:
-                    await client.generate_content("test", model=Model.G_2_5_FLASH)
-                    logger.info(f"Simple refresh for account: {account_id}")
-                    refresh_count += 1
-                except Exception as e:
-                    logger.error(f"Failed simple refresh for {account_id}: {e}")
-            return
+        
             
         refresh_count = 0
         for account_id, client in list(clients.items()):
@@ -305,7 +290,7 @@ class CookieRefreshScheduler:
                     chat = client.start_chat()
                     session_id = str(uuid.uuid4())
                     
-                    # Store in memory for future reuse
+                    # Store chat session in memory for reuse ONLY
                     if account_id not in chat_sessions:
                         chat_sessions[account_id] = {}
                     chat_sessions[account_id][session_id] = chat
@@ -524,23 +509,27 @@ def _persist_gems(gems: List[Dict[str, Any]]) -> None:
 
 
 def _load_refresh_sessions() -> Dict[str, Dict[str, Any]]:
-    """Load refresh session data from storage"""
+    """Load refresh session data from storage ONLY"""
     try:
         if REFRESH_SESSIONS_FILE.exists():
             data = json.loads(REFRESH_SESSIONS_FILE.read_text())
             return data if isinstance(data, dict) else {}
+        else:
+            logger.warning("Refresh sessions file does not exist - creating new one")
+            return {}
     except Exception as exc:
-        logger.warning(f"Failed to read refresh sessions: {exc}")
-    return {}
+        logger.error(f"FAILED to load refresh sessions from storage: {exc}")
+        raise HTTPException(status_code=500, detail="Storage failure - cannot continue")
 
 
 def _save_refresh_sessions(sessions: Dict[str, Dict[str, Any]]) -> None:
-    """Save refresh session data to storage"""
+    """Save refresh session data to storage ONLY"""
     try:
         REFRESH_SESSIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
         REFRESH_SESSIONS_FILE.write_text(json.dumps(sessions, indent=2))
     except Exception as exc:
-        logger.error(f"Failed to save refresh sessions: {exc}")
+        logger.error(f"FAILED to save refresh sessions to storage: {exc}")
+        raise HTTPException(status_code=500, detail="Storage failure - cannot continue")
 
 
 _GEM_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
@@ -1227,13 +1216,12 @@ async def storage_status():
                 refresh_info = {
                     "file_exists": True,
                     "sessions_count": len(sessions),
-                    "sessions": sessions,
-                    "in_memory_fallback": _in_memory_refresh_sessions
+                    "sessions": sessions
                 }
             except Exception as e:
                 refresh_info = {"file_exists": True, "error": str(e)}
         else:
-            refresh_info = {"file_exists": False, "in_memory_fallback": _in_memory_refresh_sessions}
+            refresh_info = {"file_exists": False}
         
         # Check account directories
         accounts_info = {"accounts": []}
